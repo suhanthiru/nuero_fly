@@ -22,3 +22,6 @@ runs/
 
 # generated scene assets (~29 MB, rebuild with scripts/build_scene.py)
 viz/frontend/public/scene/
+
+# simulation outputs
+runs/
