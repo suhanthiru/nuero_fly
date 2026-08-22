@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MaleCNS</title>
+    <style>
+      :root {
+        --bg: #08090b;
+        --ink: #e6e8ea;
+        --dim: #7b828c;
+        --hair: rgba(230, 232, 234, 0.10);
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        background: var(--bg);
+        color: var(--ink);
+        font: 400 12px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        overflow: hidden;
+      }
+      #canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+
+      .panel {
+        position: fixed;
+        background: rgba(8, 9, 11, 0.72);
+        border: 1px solid var(--hair);
+        padding: 12px 14px;
+        backdrop-filter: blur(8px);
+        pointer-events: none;
+      }
+      #title { top: 18px; left: 18px; }
+      #title h1 {
+        margin: 0 0 2px;
+        font-size: 13px;
+        font-weight: 500;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+      #title p { margin: 0; color: var(--dim); font-size: 11px; }
+
+      #legend { top: 18px; right: 18px; min-width: 210px; }
+      #legend h2 {
+        margin: 0 0 8px;
+        font-size: 10px;
+        font-weight: 500;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--dim);
+      }
+      .stage { margin-bottom: 10px; }
+      .stage-name {
+        color: var(--dim);
+        font-size: 10px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        margin-bottom: 3px;
+      }
+      .row { display: flex; align-items: center; gap: 7px; padding: 1px 0; }
+      .sw { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+      .row .n { margin-left: auto; color: var(--dim); }
+
+      #keys { bottom: 18px; left: 18px; color: var(--dim); }
+      #keys b { color: var(--ink); font-weight: 500; }
+      #stats { bottom: 18px; right: 18px; color: var(--dim); text-align: right; }
+
+      #hover {
+        position: fixed;
+        padding: 6px 9px;
+        background: rgba(8, 9, 11, 0.92);
+        border: 1px solid var(--hair);
+        pointer-events: none;
+        display: none;
+        white-space: nowrap;
+        z-index: 10;
+      }
+      #hover .t { color: var(--ink); }
+      #hover .s { color: var(--dim); }
+
+      #loading {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-content: center;
+        text-align: center;
+        color: var(--dim);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        font-size: 11px;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas"></canvas>
+    <div id="loading">loading connectome geometry</div>
+
+    <div class="panel" id="title" hidden>
+      <h1>Male CNS</h1>
+      <p id="subtitle"></p>
+    </div>
+
+    <div class="panel" id="legend" hidden>
+      <h2>Escape pathway</h2>
+      <div id="legend-body"></div>
+    </div>
+
+    <div class="panel" id="keys" hidden>
+      <b>drag</b> orbit &nbsp; <b>scroll</b> zoom &nbsp; <b>1</b> anterior &nbsp;
+      <b>2</b> lateral &nbsp; <b>3</b> dorsal &nbsp; <b>4</b> neck &nbsp;
+      <b>c</b> context &nbsp; <b>s</b> shells
+    </div>
+
+    <div class="panel" id="stats" hidden></div>
+    <div id="hover"></div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -19,3 +19,6 @@ viz/frontend/dist/
 # outputs
 runs/
 *.png
+
+# generated scene assets (~29 MB, rebuild with scripts/build_scene.py)
+viz/frontend/public/scene/
