@@ -1,0 +1,21 @@
+# data: large, redistributable only under FlyWire / MaleCNS terms — never commit
+data/raw/
+data/cache/
+*.feather
+*.npz
+*.csv.gz
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# node
+node_modules/
+viz/frontend/dist/
+
+# outputs
+runs/
+*.png

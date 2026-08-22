@@ -1,0 +1,32 @@
+# Package name is simply the existing directory name. The project itself is unnamed
+# by explicit request; do not infer a project name from this field.
+[project]
+name = "nuero-fly"
+version = "0.0.0"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.0",        # jax >=0.10 requires numpy 2 (np.dtypes.StringDType)
+    "scipy>=1.13",
+    "pandas>=2.2",
+    "pyarrow>=16",       # MaleCNS ships Arrow/feather
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+# JAX with CUDA 12. Separated so Phase 0 (loader) installs fast and stays GPU-free.
+gpu = ["jax[cuda12]>=0.10"]
+cpu = ["jax>=0.10"]
+# Phase 4 only. Phases 0-1 must install and run without this.
+viz = ["cloud-volume>=8.32"]
+
+[dependency-groups]
+dev = ["pytest>=8", "matplotlib>=3.8"]
+# Shiu et al. Brian2 reference implementation, used only as the Phase 1 oracle.
+reference = ["brian2>=2.7"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: long-running integration tests (Shiu reproduction)"]
