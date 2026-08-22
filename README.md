@@ -16,8 +16,40 @@ why it exists.
 
 ## Status
 
-Phase 0 (connectome loader) and Phase 1 (LIF core and published-result reproduction).
-Phases 2-4 are designed but not built.
+Phase 0 (connectome loader), Phase 1 (LIF core, validated against the Shiu et al. reference
+implementation), Phase 2 (analytic looming encoder and the l/|v| sweep). The 3D viewer is
+built but shows anatomy only - it is not yet driven by simulated activity.
+
+### Phase 2 result: the escape mode split does not appear
+
+The scientific target was the short/long escape mode split. It does not emerge, and the
+sweep says something more specific than "it didn't work":
+
+* **No long-mode escape at any encoder gain.** Every trial that produces a takeoff is
+  giant-fiber mediated. In this model TTMn is driven essentially only through the GF and
+  the GF-coupled interneurons, so there is no GF-independent route to the motor neuron and
+  therefore no second mode to find.
+* **At our first-choice gain the latency scaling is destroyed too.** GF first-spike time
+  varies by 8 ms across an eightfold change in looming speed - it is set by our visual
+  latency constant, not by the stimulus.
+* **At 30-100x lower gain the published latency relationship does appear**: escape occurs
+  progressively earlier before contact as looming slows, which is what an angular-size
+  threshold predicts, and at the fastest looming the GF fires ~4 ms before contact.
+* **But nothing in the data picks that gain.** It is a free parameter of ours, and the span
+  between "saturated" and "silent" is about two orders of magnitude. The latency scaling is
+  therefore conditional on our choice, not a prediction of the connectome.
+
+The mechanism behind the saturation is measurable and is a limitation of the *neuron model*
+rather than of the wiring: one LC4 spike delivers 13.9 mV to the giant fiber, which is
+2.2 mV of membrane deflection against the 7 mV gap from rest to threshold. Roughly **3.2
+coincident LC4 spikes fire the GF**. With 311 driven cells, any appreciable firing rate
+saturates it. Shiu et al.'s parameterisation gives every neuron the same 20 ms membrane
+time constant and the same 7 mV threshold, and the giant fiber is one of the largest
+neurons in the animal. A single-compartment model with brain-wide uniform parameters cannot
+represent a cell whose whole function is to integrate hundreds of inputs to a sharp
+threshold near contact.
+
+Reproduce with `scripts/looming_sweep.py` and `scripts/looming_gain_sweep.py`.
 
 ## Data
 
