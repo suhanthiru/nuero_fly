@@ -17,8 +17,28 @@ why it exists.
 ## Status
 
 Phase 0 (connectome loader), Phase 1 (LIF core, validated against the Shiu et al. reference
-implementation), Phase 2 (analytic looming encoder and the l/|v| sweep). The 3D viewer is
-built but shows anatomy only - it is not yet driven by simulated activity.
+implementation), Phase 2 (analytic looming encoder and the l/|v| sweep), and the live demo:
+the 3D viewer is now driven by simulated activity.
+
+Phase 3 (MuJoCo physics) is not built - `world/` is empty.
+
+### Running the demo
+
+```
+python run_demo.py --ratio 40 --gain 0.03      # simulate a trial and stream it
+npm --prefix viz/frontend run dev              # then open the printed URL
+```
+
+The trial is simulated once at startup and played back at 20 Hz under an adjustable time
+dilation. That is not a shortcut: a trial is 8,000 timesteps over 165k neurons and cannot be
+produced at wall-clock speed, and a giant fiber escape lasts a few milliseconds, which at
+real time would fall inside a single frame. `?t=350&view=neck` deep-links a moment.
+
+Brightness is smoothed activity, not spikes - spike trains convolved with a 50 ms
+exponential, which is what a calcium indicator does to the same signal. Full brightness
+means a neuron firing at the reference rate, and the stream auto-ranges with the chosen
+scale reported in the header, because activity spans more than two orders of magnitude
+between the LC populations and the giant fiber.
 
 ### Phase 2 result: the escape mode split does not appear
 

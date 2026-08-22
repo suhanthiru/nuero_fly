@@ -344,6 +344,8 @@ class LIF(NeuronModel):
             dt_ms=params.dt,
             spike_times=spike_times,
             voltages=voltages,
+            raster=np.asarray(raster) if record_idx.size else np.zeros((0, 0), dtype=bool),
+            record_indices=record_idx,
             meta={
                 "model": self.name,
                 "params": params.__dict__,

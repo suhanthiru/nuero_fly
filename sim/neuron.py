@@ -45,6 +45,10 @@ class SimulationResult:
     # Membrane trace per recorded neuron. Cheap when few neurons are recorded, and the only
     # way to check the integrator against a closed-form solution rather than against itself.
     voltages: dict[int, np.ndarray]
+    #: (n_steps, n_recorded) boolean spike raster, in the order of `record_indices`. Kept
+    #: alongside spike_times because the activity kernel wants the dense form.
+    raster: np.ndarray
+    record_indices: np.ndarray
     meta: dict[str, Any]
 
     def rates_hz(self) -> np.ndarray:

@@ -1,5 +1,5 @@
 /**
- * The 3D brain view.
+ * The 3D brain view, driven by simulated activity.
  *
  * Design rules this file is required to honour:
  *   - colour encodes cell type, brightness encodes activity; activity never touches hue
@@ -9,13 +9,23 @@
  *
  * deck.gl rather than a scene graph, because the thing that changes every frame is a
  * per-object scalar in an attribute buffer, not the structure of a scene.
+ *
+ * Layers are split into static (shells, context cloud) and activity-driven (pathway somata,
+ * skeleton bundles, identified-cell meshes). Only the latter are rebuilt, and only when a
+ * new frame arrives - rebuilding everything per camera frame is what made orbiting unusable
+ * before.
  */
 
 import { Deck, OrbitView, type PickingInfo } from '@deck.gl/core';
 import { LineLayer, PointCloudLayer } from '@deck.gl/layers';
 import { SimpleMeshLayer } from '@deck.gl/mesh-layers';
 
+import { ArenaPanel } from './arena';
 import { loadScene, partition, type Scene } from './scene';
+import { ActivityIndex, Stream, type Frame, type Hello } from './stream';
+import { TracePanel } from './traces';
+
+const STREAM_URL = `ws://${location.hostname}:8000/stream`;
 
 const INITIAL_VIEW = {
   target: [0, 0, 0] as [number, number, number],
@@ -28,8 +38,7 @@ const INITIAL_VIEW = {
 
 // Draw only back faces - the far wall of the hull. The near wall would sit between the
 // camera and the neurons, veiling the subject; the far wall instead becomes a backdrop the
-// neurons read against. Drawing both walls also doubles the accumulated alpha, which is
-// what made the shells brighter than the cells they are meant to sit behind.
+// neurons read against.
 const SHELL_PARAMETERS = {
   depthWriteEnabled: false,
   cullMode: 'front',
@@ -42,19 +51,40 @@ const SHELL_PARAMETERS = {
   blendAlphaDstFactor: 'one',
 } as const;
 
+// Activity spans more than two orders of magnitude across the pathway - the LC populations
+// sit far below the giant fiber - so a linear ramp would render the bundles black. This
+// gamma is a display transform only; the streamed values are untouched, and the subtitle
+// states both it and what full brightness corresponds to.
+const DISPLAY_GAMMA = 0.45;
+
+// Below this, a neuron is drawn at its resting colour rather than lit, so the baseline does
+// not read as activity.
+const FLOOR = 0.02;
+
 type ViewState = typeof INITIAL_VIEW;
 
 let scene: Scene;
+let deck: Deck<any>;
 let viewState: ViewState = { ...INITIAL_VIEW };
 let showContext = true;
 let showShells = true;
 let showMorphology = true;
-let deck: Deck<any>;
+
+let parts: ReturnType<typeof partition>;
+let staticLayers: any[] | null = null;
+let index: ActivityIndex | null = null;
+let lastStep = -1;
+
+const stream = new Stream(STREAM_URL);
+const traces = new TracePanel(document.getElementById('traces') as HTMLCanvasElement);
+const arena = new ArenaPanel(document.getElementById('arena-canvas') as HTMLCanvasElement);
+
+/** Per-neuron colour buffers, allocated once and mutated in place each frame. */
+let pathwayColour: Uint8Array;
+let pathwayBase: Uint8Array;
 
 function centroid(positions: Float32Array): [number, number, number] {
-  let x = 0;
-  let y = 0;
-  let z = 0;
+  let x = 0, y = 0, z = 0;
   const n = positions.length / 3;
   for (let i = 0; i < n; i++) {
     x += positions[i * 3];
@@ -65,10 +95,7 @@ function centroid(positions: Float32Array): [number, number, number] {
 }
 
 function halfCentroid(points: Float32Array, xSign: number): [number, number, number] {
-  let x = 0;
-  let y = 0;
-  let z = 0;
-  let n = 0;
+  let x = 0, y = 0, z = 0, n = 0;
   for (let i = 0; i < points.length / 3; i++) {
     if (Math.sign(points[i * 3]) !== xSign) continue;
     x += points[i * 3];
@@ -79,12 +106,15 @@ function halfCentroid(points: Float32Array, xSign: number): [number, number, num
   return n ? [x / n, y / n, z / n] : [0, 0, 0];
 }
 
-// partition() walks all 140k somata and allocates five typed arrays. It depends only on
-// the scene, never on the camera, so it is computed once.
-let cachedParts: ReturnType<typeof partition> | null = null;
+/** Streamed 0..255 -> display brightness 0..1. */
+function brightness(raw: number): number {
+  const value = raw / 255;
+  return value < FLOOR ? 0 : Math.pow(value, DISPLAY_GAMMA);
+}
 
-function buildLayers() {
-  const parts = (cachedParts ??= partition(scene.somata));
+// --- layers ----------------------------------------------------------------------
+
+function buildStaticLayers(): any[] {
   const layers: any[] = [];
 
   if (showShells) {
@@ -107,8 +137,47 @@ function buildLayers() {
     }
   }
 
+  if (showContext) {
+    layers.push(
+      new PointCloudLayer({
+        id: 'somata-context',
+        data: {
+          length: parts.context.count,
+          attributes: {
+            getPosition: { value: parts.context.position, size: 3 },
+            getColor: { value: parts.context.color, size: 3 },
+          },
+        },
+        pointSize: 1.0,
+        // Standard alpha blending, not additive: ~90k of the 140k somata sit in the optic
+        // lobe rind, and additive accumulation there saturates to white and beats the
+        // pathway it is meant to sit behind.
+        opacity: showMorphology ? 0.22 : 0.62,
+        material: false,
+        pickable: false,
+        parameters: { depthWriteEnabled: false },
+      }),
+    );
+  }
+  return layers;
+}
+
+function buildActivityLayers(frame: Frame | null): any[] {
+  const layers: any[] = [];
+  const aggregate = frame?.aggregate ?? {};
+  const scale = stream.hello?.meta?.display_scale ?? 1;
+
+  const typeBrightness = (type: string): number => {
+    const raw = (aggregate[type] ?? 0) / (scale || 1);
+    return raw < FLOOR ? 0 : Math.pow(Math.min(raw, 1), DISPLAY_GAMMA);
+  };
+
   if (showMorphology) {
     for (const bundle of scene.bundles) {
+      // Populations are lit by their cell-type mean. Per-axon brightness would need a body
+      // id per skeleton, which the geometry export does not currently carry.
+      const lit = typeBrightness(bundle.name);
+      const colour = bundle.color.map((c) => Math.round(c * (0.25 + 0.75 * lit)));
       layers.push(
         new LineLayer({
           id: `bundle-${bundle.name}`,
@@ -119,15 +188,15 @@ function buildLayers() {
               getTargetPosition: { value: bundle.target, size: 3 },
             },
           },
-          getColor: bundle.color,
+          getColor: colour as unknown as [number, number, number],
           getWidth: 1,
           widthUnits: 'pixels',
           widthMinPixels: 0.7,
-          // Low, because these bundles are dense by construction - that is the whole
-          // point of them - and additive segments overlapping in the glomerulus saturate
-          // to white at any higher value, erasing the LC4 / LPLC2 colour distinction.
-          opacity: 0.13,
+          // Low, because these bundles are dense by construction and additive segments
+          // overlapping in the glomerulus saturate to white at any higher value.
+          opacity: 0.1 + 0.16 * lit,
           pickable: false,
+          updateTriggers: { getColor: colour.join(',') },
           parameters: {
             depthWriteEnabled: false,
             blend: true,
@@ -142,9 +211,11 @@ function buildLayers() {
       );
     }
 
-    // The identified cells are drawn as solid geometry with depth, so they read as
-    // objects the bundles arrive at rather than as more lines in the tangle.
     for (const neuron of scene.neuronMeshes) {
+      let lit = typeBrightness(neuron.name);
+      const column = stream.hello?.body_ids.indexOf(String(neuron.bodyId)) ?? -1;
+      if (frame && column >= 0) lit = brightness(frame.activity[column]);
+      const colour = neuron.color.map((c) => Math.round(c * (0.28 + 0.72 * lit)));
       layers.push(
         new SimpleMeshLayer({
           id: `neuron-${neuron.name}-${neuron.bodyId}`,
@@ -154,9 +225,10 @@ function buildLayers() {
             indices: { value: neuron.indices, size: 1 },
           },
           getPosition: (d: any) => d.position,
-          getColor: [...neuron.color, 235],
+          getColor: [...colour, 235] as unknown as [number, number, number, number],
           material: false,
           pickable: false,
+          updateTriggers: { getColor: colour.join(',') },
           // Closed surfaces, so culling back faces halves fragment work for free.
           parameters: { depthWriteEnabled: true, cullMode: 'back' },
         }),
@@ -164,33 +236,18 @@ function buildLayers() {
     }
   }
 
-  if (showContext) {
-    layers.push(
-      new PointCloudLayer({
-        id: 'somata-context',
-        data: {
-          length: parts.context.count,
-          attributes: {
-            getPosition: { value: parts.context.position, size: 3 },
-            getColor: { value: parts.context.color, size: 3 },
-          },
-        },
-        pointSize: 1.0,
-        // Standard alpha blending, not additive. The optic lobe cortical rind holds ~90k
-        // of the 140k somata, and additive accumulation there saturates to white at any
-        // usable alpha - which inverts the whole hierarchy by making context brighter than
-        // the pathway. Alpha blending caps at the source colour, so the rind stays slate
-        // and dense regions read as solid rather than incandescent.
-        opacity: showMorphology ? 0.22 : 0.62,
-        material: false,
-        pickable: false,
-        parameters: { depthWriteEnabled: false },
-      }),
-    );
+  // Pathway somata: per-neuron brightness, the finest-grained thing on screen.
+  if (frame && index) {
+    for (let i = 0; i < parts.pathway.count; i++) {
+      const column = index.columnForSoma[i];
+      const lit = column >= 0 ? brightness(frame.activity[column]) : 0;
+      const gain = 0.22 + 0.78 * lit;
+      pathwayColour[i * 3] = pathwayBase[i * 3] * gain;
+      pathwayColour[i * 3 + 1] = pathwayBase[i * 3 + 1] * gain;
+      pathwayColour[i * 3 + 2] = pathwayBase[i * 3 + 2] * gain;
+    }
   }
 
-  // Drawn last and depth-tested against nothing, so the pathway is never lost inside the
-  // cloud. This is the subject of the image; it is allowed to win.
   layers.push(
     new PointCloudLayer({
       id: 'somata-pathway',
@@ -198,76 +255,229 @@ function buildLayers() {
         length: parts.pathway.count,
         attributes: {
           getPosition: { value: parts.pathway.position, size: 3 },
-          getColor: { value: parts.pathway.color, size: 3 },
+          getColor: { value: pathwayColour, size: 3 },
         },
       },
       pointSize: 5.5,
       opacity: 1,
       material: false,
       pickable: true,
+      updateTriggers: { getColor: lastStep },
+      // Drawn last and depth-tested against nothing, so the subject is never lost inside
+      // the cloud.
       parameters: { depthWriteEnabled: false, depthCompare: 'always' },
-      onHover: (info: PickingInfo) => showHover(info, parts.pathway.index),
+      onHover: (info: PickingInfo) => showHover(info),
     }),
   );
 
   return layers;
 }
 
-function showHover(info: PickingInfo, lookup: Uint32Array) {
-  const el = document.getElementById('hover')!;
-  if (info.index < 0 || !info.picked) {
-    el.style.display = 'none';
-    return;
-  }
-  const i = lookup[info.index];
-  const type = scene.somata.cellTypes[scene.somata.typeIndex[i]];
-  const stage = scene.somata.stages[scene.somata.typeIndex[i]];
-  el.innerHTML =
-    `<span class="t">${type}</span><br>` +
-    `<span class="s">${stage.replace('_', ' ')} &middot; body ${scene.somata.bodyId[i]}</span>`;
-  el.style.display = 'block';
-  el.style.left = `${info.x + 14}px`;
-  el.style.top = `${info.y + 14}px`;
+function redraw(): void {
+  staticLayers ??= buildStaticLayers();
+  deck.setProps({
+    layers: [...staticLayers, ...buildActivityLayers(stream.frame)],
+    viewState: viewState as any,
+  });
 }
 
-let layerCache: any[] | null = null;
-
-/** Rebuild the layer list. Only call this when a toggle changes what is drawn. */
-function render() {
-  layerCache = buildLayers();
-  deck.setProps({ layers: layerCache, viewState });
+function invalidateStatic(): void {
+  staticLayers = null;
+  redraw();
 }
 
-/**
- * Camera-only update.
- *
- * Deliberately does NOT rebuild layers. Reconstructing them on every camera frame means
- * re-running the 140k-soma partition and handing deck.gl freshly allocated binary
- * attributes sixty times a second, which it then has to diff and re-upload - and that
- * made orbiting unusable.
- */
-function updateCamera() {
-  deck.setProps({ viewState });
+/** Camera-only update: deliberately does not rebuild layers. */
+function updateCamera(): void {
+  deck.setProps({ viewState: viewState as any });
 }
 
-function flyTo(next: Partial<ViewState>) {
+function flyTo(next: Partial<ViewState>): void {
   viewState = { ...viewState, ...next };
   updateCamera();
 }
 
-/** Named camera framings, resolved once the geometry is loaded. */
+function showHover(info: PickingInfo): void {
+  const element = document.getElementById('hover')!;
+  if (info.index < 0 || !info.picked) {
+    element.style.display = 'none';
+    return;
+  }
+  const i = parts.pathway.index[info.index];
+  const type = scene.somata.cellTypes[scene.somata.typeIndex[i]];
+  const column = index ? index.columnForSoma[info.index] : -1;
+  const value =
+    stream.frame && column >= 0
+      ? `${(stream.frame.activity[column] / 255).toFixed(2)} rel.`
+      : 'no signal';
+  element.innerHTML =
+    `${type}<br><span class="s">body ${scene.somata.bodyId[i]} &middot; ${value}</span>`;
+  element.style.display = 'block';
+  element.style.left = `${info.x + 14}px`;
+  element.style.top = `${info.y + 14}px`;
+}
+
+// --- panels and HUD ---------------------------------------------------------------
+
+const text = (id: string, value: string) => {
+  const node = document.getElementById(id);
+  if (node) node.textContent = value;
+};
+
+function configureTraces(hello: Hello): void {
+  const history = hello.history;
+  const scale = hello.meta?.display_scale ?? 1;
+  const normalise = (series: number[]) => series.map((v) => v / (scale || 1));
+  const peak = (series: number[] | undefined, floor: number) =>
+    Math.max(floor, ...(series && series.length ? series : [floor]));
+
+  const rows = [
+    { key: 'θ', colour: '#94a3b8',
+      scale: peak(history.theta_deg, 10), series: history.theta_deg ?? [] },
+    { key: 'θ̇', colour: '#cbd5e1',
+      scale: peak(history.theta_dot, 0.01), series: history.theta_dot ?? [] },
+  ];
+  for (const type of ['LC4', 'LPLC2', 'DNp01', 'GFC2', 'TTMn']) {
+    const series = history.aggregate[type];
+    if (!series) continue;
+    rows.push({
+      key: type,
+      colour: hello.palette[type] ?? '#64748b',
+      scale: 1,
+      series: normalise(series),
+    });
+  }
+  traces.configure(rows, history.stride);
+
+  // Mark the giant fiber spike and the moment of contact on the shared time axis.
+  const gfMs = hello.events?.gf_spike_ms ?? null;
+  if (gfMs !== null) traces.mark(Math.round(gfMs / hello.dt_ms), 'GF');
+  if (hello.collision_ms !== null) {
+    traces.mark(Math.round(hello.collision_ms / hello.dt_ms), 'contact');
+  }
+}
+
+function updatePanels(frame: Frame, hello: Hello): void {
+  const gfMs = hello.events?.gf_spike_ms ?? null;
+  const fired = gfMs !== null && frame.t_ms >= gfMs;
+
+  arena.draw({
+    thetaDeg: frame.theta_deg ?? 0,
+    thetaDot: frame.theta_dot ?? 0,
+    distanceMm: frame.distance_mm ?? 0,
+    startDistanceMm: startDistance,
+    tMs: frame.t_ms,
+    collisionMs: hello.collision_ms,
+    fired,
+  });
+
+  text('hud-t', `${frame.t_ms.toFixed(1)} ms`);
+  text('hud-theta', `${(frame.theta_deg ?? 0).toFixed(1)}°`);
+  text('hud-thetadot', `${(frame.theta_dot ?? 0).toFixed(3)} °/ms`);
+  text('hud-ratio', hello.ratio_ms === null ? '—' : `${hello.ratio_ms.toFixed(0)} ms`);
+  text(
+    'hud-contact',
+    hello.collision_ms === null
+      ? '—'
+      : `${(hello.collision_ms - frame.t_ms).toFixed(0)} ms`,
+  );
+
+  const gfCell = document.getElementById('hud-gf')!;
+  gfCell.textContent = gfMs === null ? 'silent' : `${gfMs.toFixed(1)} ms`;
+  gfCell.className = fired ? 'fired' : '';
+  const ttmMs = hello.events?.ttm_spike_ms ?? null;
+  text('hud-ttm', ttmMs === null ? 'silent' : `${ttmMs.toFixed(1)} ms`);
+
+  updateLegend(frame, hello);
+}
+
+/** Largest distance seen this trial, so the top-down inset has a stable scale. */
+let startDistance = 1;
+
+function updateLegend(frame: Frame, hello: Hello): void {
+  const scale = hello.meta?.display_scale ?? 1;
+  const container = document.getElementById('legend')!;
+  const types = Object.keys(frame.aggregate).sort();
+  if (container.childElementCount !== types.length) {
+    container.innerHTML = types
+      .map((type) => {
+        const colour = hello.palette[type] ?? '#64748b';
+        return (
+          `<div class="row" data-type="${type}">` +
+          `<span class="sw" style="background:${colour}"></span>${type}` +
+          `<span class="bar"><span style="background:${colour};width:0%"></span></span></div>`
+        );
+      })
+      .join('');
+  }
+  for (const type of types) {
+    const bar = container.querySelector(`[data-type="${type}"] .bar span`) as HTMLElement;
+    if (!bar) continue;
+    const value = Math.min(1, (frame.aggregate[type] ?? 0) / (scale || 1));
+    bar.style.width = `${(value * 100).toFixed(1)}%`;
+  }
+}
+
+// --- controls ---------------------------------------------------------------------
+
+function wireControls(): void {
+  const playpause = document.getElementById('playpause') as HTMLButtonElement;
+  let playing = true;
+  playpause.onclick = () => {
+    playing = !playing;
+    playpause.textContent = playing ? 'pause' : 'play';
+    if (playing) stream.play();
+    else stream.pause();
+  };
+
+  const speed = document.getElementById('speed') as HTMLInputElement;
+  const applySpeed = () => {
+    const value = Math.pow(10, Number(speed.value));
+    stream.speed(value);
+    const label = `1/${Math.round(1 / value)}×`;
+    text('speed-label', label);
+    text('hud-speed', label);
+  };
+  speed.value = String(Math.log10(0.02));
+  speed.oninput = applySpeed;
+
+  document.getElementById('rerun')!.addEventListener('click', () => {
+    const ratio = Number((document.getElementById('ratio') as HTMLInputElement).value);
+    const gain = Number((document.getElementById('gain') as HTMLInputElement).value);
+    stream.rerun(ratio, gain, 0);
+    text('status', 'simulating…');
+  });
+
+  window.addEventListener('keydown', (event) => {
+    if ((event.target as HTMLElement)?.tagName === 'INPUT') return;
+    const views = buildViews();
+    const byKey: Record<string, string> = {
+      '1': 'anterior', '2': 'lateral', '3': 'dorsal', '4': 'neck', '5': 'glomerulus',
+    };
+    if (byKey[event.key]) {
+      flyTo(views[byKey[event.key]]);
+      return;
+    }
+    switch (event.key) {
+      case ' ':
+        event.preventDefault();
+        playpause.click();
+        break;
+      case 'm': showMorphology = !showMorphology; invalidateStatic(); break;
+      case 'c': showContext = !showContext; invalidateStatic(); break;
+      case 's': showShells = !showShells; invalidateStatic(); break;
+    }
+  });
+
+  applySpeed();
+}
+
 function buildViews(): Record<string, Partial<ViewState>> {
   const cv = scene.shells.find((s) => s.name === 'CV');
   const neck = cv ? centroid(cv.positions) : ([0, 0, 0] as [number, number, number]);
-
-  // The right optic glomerulus, where the LC4 axons terminate onto the giant fiber's
-  // dendrite. Taken from the right-hemisphere half of the LC4 arbour's *terminal* ends:
-  // after recentring, Optic(R) sits at negative x.
   const lc4 = scene.bundles.find((b) => b.name === 'LC4');
   const glomerulus = lc4
     ? halfCentroid(lc4.target, -1)
     : ([0, 0, 0] as [number, number, number]);
-
   return {
     anterior: { target: [0, 0, 0], rotationX: 0, rotationOrbit: 0, zoom: 0.08 },
     lateral: { target: [0, 0, 0], rotationX: 0, rotationOrbit: 90, zoom: 0.08 },
@@ -277,119 +487,87 @@ function buildViews(): Record<string, Partial<ViewState>> {
   };
 }
 
-/**
- * Query parameters, so a specific framing can be captured without a keyboard.
- * ``?view=glomerulus&context=0&shells=0`` is how the stills get taken.
- */
-function applyUrlOverrides(views: Record<string, Partial<ViewState>>) {
-  const params = new URLSearchParams(window.location.search);
-  const name = params.get('view');
-  if (name && views[name]) viewState = { ...viewState, ...views[name] };
-  if (params.get('context') === '0') showContext = false;
-  if (params.get('shells') === '0') showShells = false;
-  if (params.get('morphology') === '0') showMorphology = false;
-}
+// ----------------------------------------------------------------------------------
 
-function presets(views: Record<string, Partial<ViewState>>) {
-  const byKey: Record<string, string> = {
-    '1': 'anterior',
-    '2': 'lateral',
-    '3': 'dorsal',
-    '4': 'neck',
-    '5': 'glomerulus',
-  };
-
-  window.addEventListener('keydown', (event) => {
-    if (byKey[event.key]) {
-      flyTo(views[byKey[event.key]]);
-      return;
-    }
-    switch (event.key) {
-      case 'm':
-        showMorphology = !showMorphology;
-        render();
-        break;
-      case 'c':
-        showContext = !showContext;
-        render();
-        break;
-      case 's':
-        showShells = !showShells;
-        render();
-        break;
-    }
-  });
-}
-
-function buildLegend() {
-  const counts = new Map<string, number>();
-  for (let i = 0; i < scene.somata.count; i++) {
-    if (!scene.somata.pathway[i]) continue;
-    const type = scene.somata.cellTypes[scene.somata.typeIndex[i]];
-    counts.set(type, (counts.get(type) ?? 0) + 1);
-  }
-
-  const byStage = new Map<string, string[]>();
-  for (const type of counts.keys()) {
-    const stage = scene.somata.stages[scene.somata.cellTypes.indexOf(type)];
-    if (!byStage.has(stage)) byStage.set(stage, []);
-    byStage.get(stage)!.push(type);
-  }
-
-  const order = ['visual_projection', 'descending', 'motor'];
-  const html = order
-    .filter((stage) => byStage.has(stage))
-    .map((stage) => {
-      const rows = byStage
-        .get(stage)!
-        .sort()
-        .map((type) => {
-          const color = scene.manifest.palette.cell_type[type] ?? '#64748b';
-          return `<div class="row"><span class="sw" style="background:${color}"></span>${type}<span class="n">${counts.get(type)}</span></div>`;
-        })
-        .join('');
-      return `<div class="stage"><div class="stage-name">${stage.replace('_', ' ')}</div>${rows}</div>`;
-    })
-    .join('');
-
-  document.getElementById('legend-body')!.innerHTML = html;
-}
-
-async function main() {
+async function main(): Promise<void> {
   scene = await loadScene();
+  parts = partition(scene.somata);
+  pathwayBase = new Uint8Array(parts.pathway.color);
+  pathwayColour = new Uint8Array(parts.pathway.color.length);
+  pathwayColour.set(parts.pathway.color);
 
   document.getElementById('loading')!.remove();
-  for (const id of ['title', 'legend', 'keys', 'stats']) {
-    document.getElementById(id)!.hidden = false;
-  }
-  document.getElementById('subtitle')!.textContent =
-    `${scene.manifest.dataset} · ${scene.somata.count.toLocaleString()} somata`;
-  document.getElementById('stats')!.innerHTML =
-    `${scene.manifest.extent_um.map((v) => Math.round(v)).join(' × ')} µm<br>` +
-    `${scene.shells.reduce((a, s) => a + s.n_triangles, 0).toLocaleString()} triangles`;
-
-  buildLegend();
-  const views = buildViews();
-  applyUrlOverrides(views);
-  presets(views);
+  text(
+    'subtitle',
+    `${scene.manifest.dataset} · ${scene.somata.count.toLocaleString()} somata`,
+  );
 
   deck = new Deck({
     canvas: 'canvas',
-    // Without these the canvas keeps its 300x150 default backing store and deck renders
-    // into a postage stamp that the browser then stretches across the window.
+    views: new OrbitView({ orbitAxis: 'Z', fovy: 50 }),
+    initialViewState: viewState as any,
+    // Without these the canvas keeps its 300x150 default backing store.
     width: '100%',
     height: '100%',
     useDevicePixels: true,
-    views: new OrbitView({ orbitAxis: 'Z', fovy: 50 }),
-    initialViewState: viewState,
     controller: { inertia: 250 },
     onViewStateChange: ({ viewState: next }: any) => {
       viewState = next;
       updateCamera();
     },
-    parameters: { clearColor: [0.031, 0.035, 0.043, 1] },
-    layers: buildLayers(),
+    parameters: { clearColor: [0.031, 0.035, 0.043, 1] } as any,
+    layers: [],
   });
+
+  wireControls();
+  redraw();
+
+  // Deep-linking: ?t=360 seeks to that simulation millisecond on connect, ?view=neck
+  // picks a camera preset. Both exist so a specific moment can be captured or shared
+  // rather than described.
+  const params = new URLSearchParams(location.search);
+
+  stream.whenReady((hello) => {
+    index = new ActivityIndex(hello, scene.somata.bodyId, parts.pathway.index);
+    configureTraces(hello);
+    lastStep = -1;
+    startDistance = 1;
+    text('status', '');
+
+    const seekTo = params.get('t');
+    if (seekTo !== null) {
+      const step = Math.round(Number(seekTo) / hello.dt_ms);
+      stream.seek(step);
+      if (params.get('pause') !== '0') stream.pause();
+    }
+    const view = params.get('view');
+    if (view) {
+      const views = buildViews();
+      if (views[view]) flyTo(views[view]);
+    }
+
+    const full = hello.meta?.display_full_scale_hz;
+    text(
+      'subtitle',
+      `${scene.manifest.dataset} · ${scene.somata.count.toLocaleString()} somata · ` +
+        `full scale ≈ ${full ? full.toFixed(1) : '?'} Hz · display γ ${DISPLAY_GAMMA}`,
+    );
+  });
+  stream.connect();
+
+  const tick = () => {
+    const frame = stream.frame;
+    const hello = stream.hello;
+    if (frame && hello && frame.step !== lastStep) {
+      lastStep = frame.step;
+      startDistance = Math.max(startDistance, frame.distance_mm ?? 1);
+      updatePanels(frame, hello);
+      redraw();
+    }
+    traces.draw(lastStep < 0 ? 0 : lastStep);
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
 }
 
 main();

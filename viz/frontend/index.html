@@ -10,6 +10,8 @@
         --ink: #e6e8ea;
         --dim: #7b828c;
         --hair: rgba(230, 232, 234, 0.10);
+        --rail: 300px;
+        --traces: 178px;
       }
       * { box-sizing: border-box; }
       html, body {
@@ -20,100 +22,168 @@
         font: 400 12px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
         overflow: hidden;
       }
-      #canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
 
-      .panel {
-        position: fixed;
-        background: rgba(8, 9, 11, 0.72);
-        border: 1px solid var(--hair);
-        padding: 12px 14px;
-        backdrop-filter: blur(8px);
-        pointer-events: none;
-      }
-      #title { top: 18px; left: 18px; }
-      #title h1 {
-        margin: 0 0 2px;
-        font-size: 13px;
-        font-weight: 500;
-        letter-spacing: 0.06em;
-        text-transform: uppercase;
-      }
-      #title p { margin: 0; color: var(--dim); font-size: 11px; }
-
-      #legend { top: 18px; right: 18px; min-width: 210px; }
-      #legend h2 {
-        margin: 0 0 8px;
-        font-size: 10px;
-        font-weight: 500;
-        letter-spacing: 0.12em;
-        text-transform: uppercase;
-        color: var(--dim);
-      }
-      .stage { margin-bottom: 10px; }
-      .stage-name {
-        color: var(--dim);
-        font-size: 10px;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        margin-bottom: 3px;
-      }
-      .row { display: flex; align-items: center; gap: 7px; padding: 1px 0; }
-      .sw { width: 9px; height: 9px; border-radius: 50%; flex: none; }
-      .row .n { margin-left: auto; color: var(--dim); }
-
-      #keys { bottom: 18px; left: 18px; color: var(--dim); }
-      #keys b { color: var(--ink); font-weight: 500; }
-      #stats { bottom: 18px; right: 18px; color: var(--dim); text-align: right; }
-
-      #hover {
-        position: fixed;
-        padding: 6px 9px;
-        background: rgba(8, 9, 11, 0.92);
-        border: 1px solid var(--hair);
-        pointer-events: none;
-        display: none;
-        white-space: nowrap;
-        z-index: 10;
-      }
-      #hover .t { color: var(--ink); }
-      #hover .s { color: var(--dim); }
-
-      #loading {
+      #app {
         position: fixed;
         inset: 0;
         display: grid;
-        place-content: center;
-        text-align: center;
+        grid-template-columns: 1fr var(--rail);
+        grid-template-rows: 1fr var(--traces);
+      }
+      #brain { position: relative; grid-column: 1; grid-row: 1; overflow: hidden; }
+      #canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+      #rail {
+        grid-column: 2; grid-row: 1;
+        border-left: 1px solid var(--hair);
+        display: grid; grid-template-rows: 250px 1fr;
+        min-height: 0;
+      }
+      #tracewrap {
+        grid-column: 1 / -1; grid-row: 2;
+        border-top: 1px solid var(--hair);
+        position: relative;
+      }
+      /* Explicit height: <canvas> is a replaced element, so an absolutely positioned
+         one does NOT stretch between top and bottom - it falls back to its intrinsic
+         300x150. Without this the trace canvas reports a bogus client height and the
+         rows are laid out against it. */
+      #traces { position: absolute; left: 0; right: 0; top: 26px;
+                width: 100%; height: calc(100% - 26px); }
+
+      .cap {
+        font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase;
+        color: var(--dim); padding: 6px 10px 0;
+      }
+
+      .overlay {
+        position: absolute; background: rgba(8, 9, 11, 0.72);
+        border: 1px solid var(--hair); padding: 10px 12px;
+        backdrop-filter: blur(8px); pointer-events: none;
+      }
+      #title { top: 14px; left: 14px; }
+      #title h1 {
+        margin: 0 0 2px; font-size: 12px; font-weight: 500;
+        letter-spacing: 0.06em; text-transform: uppercase;
+      }
+      #title p { margin: 0; color: var(--dim); font-size: 10px; }
+
+      #hud { top: 14px; right: 14px; min-width: 168px; }
+      #hud table { border-collapse: collapse; font-size: 10px; }
+      #hud td { padding: 1px 0; }
+      #hud td:first-child { color: var(--dim); padding-right: 12px; }
+      #hud td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+      #hud .fired { color: #f43f5e; }
+
+      #keys { bottom: 14px; left: 14px; color: var(--dim); font-size: 10px; }
+      #keys b { color: var(--ink); font-weight: 500; }
+
+      #arena { border-bottom: 1px solid var(--hair); position: relative; min-height: 0; }
+      #arena canvas { position: absolute; left: 0; right: 0; top: 20px;
+                      width: 100%; height: calc(100% - 20px); }
+
+      #inspector { padding: 6px 10px 10px; overflow-y: auto; min-height: 0; }
+      #inspector h2 {
+        margin: 0 0 6px; font-size: 9px; font-weight: 500;
+        letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim);
+      }
+      .row { display: flex; align-items: center; gap: 7px; padding: 1px 0; font-size: 10px; }
+      .sw { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+      .row .n { margin-left: auto; color: var(--dim); font-variant-numeric: tabular-nums; }
+      .bar {
+        height: 3px; background: #262b33; margin-left: auto; width: 74px;
+        position: relative; flex: none;
+      }
+      .bar span { position: absolute; inset: 0 auto 0 0; background: var(--ink); }
+      #inspector .hint { color: var(--dim); font-size: 9.5px; line-height: 1.5; }
+
+      #controls {
+        position: absolute; left: 14px; right: 14px; top: 4px;
+        display: flex; align-items: center; gap: 10px; font-size: 10px;
         color: var(--dim);
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
-        font-size: 11px;
+      }
+      #controls button {
+        background: #14181e; color: var(--ink); border: 1px solid var(--hair);
+        padding: 2px 9px; font: inherit; cursor: pointer;
+      }
+      #controls button:hover { background: #1c222a; }
+      #controls input[type="range"] { width: 110px; accent-color: #4a9eff; }
+      #controls input[type="number"] {
+        width: 52px; background: #14181e; color: var(--ink);
+        border: 1px solid var(--hair); font: inherit; padding: 1px 4px;
+      }
+      #controls .spacer { flex: 1; }
+      #status { color: #fbbf24; }
+
+      #hover {
+        position: fixed; padding: 6px 9px; background: rgba(8, 9, 11, 0.92);
+        border: 1px solid var(--hair); pointer-events: none; display: none;
+        white-space: nowrap; z-index: 10; font-size: 10px;
+      }
+      #hover .s { color: var(--dim); }
+
+      #loading {
+        position: fixed; inset: 0; display: grid; place-content: center;
+        text-align: center; color: var(--dim); letter-spacing: 0.1em;
+        text-transform: uppercase; font-size: 11px; z-index: 20; background: var(--bg);
       }
     </style>
   </head>
   <body>
-    <canvas id="canvas"></canvas>
     <div id="loading">loading connectome geometry</div>
 
-    <div class="panel" id="title" hidden>
-      <h1>Male CNS</h1>
-      <p id="subtitle"></p>
+    <div id="app">
+      <div id="brain">
+        <canvas id="canvas"></canvas>
+        <div class="overlay" id="title">
+          <h1>Male CNS</h1>
+          <p id="subtitle"></p>
+        </div>
+        <div class="overlay" id="hud">
+          <table>
+            <tr><td>t</td><td id="hud-t">—</td></tr>
+            <tr><td>&theta;</td><td id="hud-theta">—</td></tr>
+            <tr><td>&theta;&#775;</td><td id="hud-thetadot">—</td></tr>
+            <tr><td>l/|v|</td><td id="hud-ratio">—</td></tr>
+            <tr><td>to contact</td><td id="hud-contact">—</td></tr>
+            <tr><td>dilation</td><td id="hud-speed">—</td></tr>
+            <tr><td>GF</td><td id="hud-gf">—</td></tr>
+            <tr><td>TTMn</td><td id="hud-ttm">—</td></tr>
+          </table>
+        </div>
+        <div class="overlay" id="keys">
+          <b>drag</b> orbit &nbsp; <b>1</b>–<b>5</b> views &nbsp;
+          <b>c</b> context &nbsp; <b>s</b> shells &nbsp; <b>m</b> morphology &nbsp;
+          <b>space</b> play
+        </div>
+      </div>
+
+      <div id="rail">
+        <div id="arena">
+          <div class="cap">arena</div>
+          <canvas id="arena-canvas"></canvas>
+        </div>
+        <div id="inspector">
+          <h2>Escape pathway</h2>
+          <div id="legend"></div>
+        </div>
+      </div>
+
+      <div id="tracewrap">
+        <div id="controls">
+          <button id="playpause">pause</button>
+          <label>dilation <input id="speed" type="range" min="-3.3" max="0" step="0.05" /></label>
+          <span id="speed-label">—</span>
+          <span class="spacer"></span>
+          <label>l/|v| <input id="ratio" type="number" min="5" max="150" step="5" value="40" /> ms</label>
+          <label>gain <input id="gain" type="number" min="0.001" max="2" step="0.005" value="0.03" /></label>
+          <button id="rerun">re-simulate</button>
+          <span id="status"></span>
+        </div>
+        <canvas id="traces"></canvas>
+      </div>
     </div>
 
-    <div class="panel" id="legend" hidden>
-      <h2>Escape pathway</h2>
-      <div id="legend-body"></div>
-    </div>
-
-    <div class="panel" id="keys" hidden>
-      <b>drag</b> orbit &nbsp; <b>scroll</b> zoom &nbsp; <b>1</b> anterior &nbsp;
-      <b>2</b> lateral &nbsp; <b>3</b> dorsal &nbsp; <b>4</b> neck &nbsp; <b>5</b> glomerulus &nbsp;
-      <b>c</b> context &nbsp; <b>s</b> shells &nbsp; <b>m</b> morphology
-    </div>
-
-    <div class="panel" id="stats" hidden></div>
     <div id="hover"></div>
-
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

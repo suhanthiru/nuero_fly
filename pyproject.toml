@@ -10,6 +10,8 @@ dependencies = [
     "pandas>=2.2",
     "pyarrow>=16",       # MaleCNS ships Arrow/feather
     "httpx>=0.27",
+    "fastapi>=0.115",          # the demo's websocket bridge
+    "uvicorn[standard]>=0.34",
 ]
 
 [project.optional-dependencies]
