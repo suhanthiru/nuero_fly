@@ -28,6 +28,10 @@ class StimulusSpec:
     poisson_targets: np.ndarray
     silenced: np.ndarray | None = None
     rate_hz: float | None = None
+    # Optional (n_steps, len(poisson_targets)) array of per-neuron rates in Hz. This is how
+    # a sensory encoder drives the network: each target follows its own time course rather
+    # than a single constant rate. Overrides rate_hz when present.
+    rate_schedule: np.ndarray | None = None
 
 
 @dataclass(frozen=True)

@@ -145,7 +145,7 @@ class LIF(NeuronModel):
         post_idx,
         pre_idx,
         weight,
-        stim_mask,
+        stim_idx,
         silence_mask,
         record_idx,
         n_neurons: int,
@@ -159,12 +159,14 @@ class LIF(NeuronModel):
         v_threshold,
         refractory_steps,
         delay_steps,
-        poisson_p,
         poisson_weight,
+        forced_idx,
         forced,
+        schedule,
         key,
     ):
-        def step(carry, forced_now):
+        def step(carry, inputs):
+            forced_now, rates_now = inputs
             v, g, refractory, buffer, slot, counts, rng = carry
 
             active = refractory <= 0
@@ -178,7 +180,8 @@ class LIF(NeuronModel):
             g = jnp.where(active, g_next, g)
 
             # 2. Threshold. Refractory neurons cannot spike; silenced ones never can.
-            spike = (active & (v > v_threshold) | forced_now) & ~silence_mask
+            forced = jnp.zeros(n_neurons, dtype=bool).at[forced_idx].set(forced_now)
+            spike = (active & (v > v_threshold) | forced) & ~silence_mask
 
             # 3. Synaptic delivery of spikes emitted `delay_steps` ago. Reading the ring
             #    buffer slot before overwriting it is what makes the delay exact.
@@ -202,9 +205,13 @@ class LIF(NeuronModel):
             # 4. Poisson drive, applied straight to v as in the reference, and before the
             #    reset - so a stimulated neuron that just spiked has the boost erased,
             #    exactly as Brian2's synapses-before-resets ordering does.
+            #
+            #    The rate is per-neuron and per-timestep, which is what lets a sensory
+            #    encoder drive each cell at its own time-varying rate. A constant stimulus
+            #    is just a schedule that does not vary.
             rng, subkey = jax.random.split(rng)
-            events = jax.random.bernoulli(subkey, poisson_p, (n_neurons,)) & stim_mask
-            v = v + poisson_weight * events
+            events = jax.random.bernoulli(subkey, rates_now)
+            v = v.at[stim_idx].add(poisson_weight * events.astype(v.dtype))
 
             # 5. Reset.
             v = jnp.where(spike, v_reset, v)
@@ -226,7 +233,9 @@ class LIF(NeuronModel):
             jnp.zeros(n_neurons, dtype=jnp.int32),
             key,
         )
-        final, (raster, voltage) = jax.lax.scan(step, init, forced, length=n_steps)
+        final, (raster, voltage) = jax.lax.scan(
+            step, init, (forced, schedule), length=n_steps
+        )
         return final[5], raster, voltage
 
     # -- public interface ----------------------------------------------------------
@@ -247,8 +256,9 @@ class LIF(NeuronModel):
         post_idx, pre_idx, synapse_count = _csr_to_coo_arrays(weights)
         weight = synapse_count * params.w_synapse
 
+        stim_idx = np.asarray(stimulus.poisson_targets, dtype=np.int32).reshape(-1)
         stim_mask = np.zeros(n_neurons, dtype=bool)
-        stim_mask[np.asarray(stimulus.poisson_targets, dtype=np.int64)] = True
+        stim_mask[stim_idx.astype(np.int64)] = True
 
         silence_mask = np.zeros(n_neurons, dtype=bool)
         if stimulus.silenced is not None and len(stimulus.silenced):
@@ -264,23 +274,39 @@ class LIF(NeuronModel):
         # stimulated neuron can follow its drive without being gated by its own last spike.
         refractory_steps = np.where(stim_mask, 0, params.refractory_steps).astype(np.int32)
 
-        # Exact externally-imposed spike times. Used to compare against another simulator
-        # without Poisson randomness in the way; also the hook a sensory encoder can use to
-        # drive neurons on a schedule rather than stochastically.
-        forced = np.zeros((n_steps, n_neurons), dtype=bool)
-        for neuron, times in (forced_spikes or {}).items():
-            steps = np.round(np.asarray(times) / params.dt).astype(int)
-            forced[steps[(steps >= 0) & (steps < n_steps)], int(neuron)] = True
+        # Exact externally-imposed spike times, stored against their own index list rather
+        # than dense over every neuron: a dense (n_steps, n_neurons) array is 1.3 GB of
+        # mostly-zeros on a whole-brain graph.
+        forced_idx = np.asarray(sorted(forced_spikes or {}), dtype=np.int32)
+        forced = np.zeros((n_steps, forced_idx.size), dtype=bool)
+        for column, neuron in enumerate(forced_idx):
+            steps = np.round(np.asarray((forced_spikes or {})[int(neuron)]) / params.dt)
+            steps = steps.astype(int)
+            forced[steps[(steps >= 0) & (steps < n_steps)], column] = True
 
         decay_v, decay_g, coupling = _decay_coefficients(params)
-        rate_hz = stimulus.rate_hz if stimulus.rate_hz is not None else params.poisson_rate_hz
-        poisson_p = rate_hz * (params.dt / 1000.0)
+
+        # Per-neuron, per-step Bernoulli probability. A constant stimulus is a flat
+        # schedule; a sensory encoder supplies a time-varying one.
+        if stimulus.rate_schedule is not None:
+            schedule_hz = np.asarray(stimulus.rate_schedule, dtype=np.float32)
+            if schedule_hz.shape != (n_steps, stim_idx.size):
+                raise ValueError(
+                    f"rate_schedule has shape {schedule_hz.shape}, expected "
+                    f"{(n_steps, stim_idx.size)} to match duration and poisson_targets"
+                )
+        else:
+            rate_hz = (
+                stimulus.rate_hz if stimulus.rate_hz is not None else params.poisson_rate_hz
+            )
+            schedule_hz = np.full((n_steps, stim_idx.size), rate_hz, dtype=np.float32)
+        schedule = schedule_hz * (params.dt / 1000.0)
 
         counts, raster, voltage = self._run(
             jnp.asarray(post_idx),
             jnp.asarray(pre_idx),
             jnp.asarray(weight),
-            jnp.asarray(stim_mask),
+            jnp.asarray(stim_idx),
             jnp.asarray(silence_mask),
             jnp.asarray(record_idx),
             n_neurons,
@@ -294,9 +320,10 @@ class LIF(NeuronModel):
             jnp.float32(params.v_threshold),
             jnp.asarray(refractory_steps, dtype=jnp.int32),
             params.delay_steps,
-            jnp.float32(poisson_p),
             jnp.float32(params.poisson_weight),
+            jnp.asarray(forced_idx),
             jnp.asarray(forced),
+            jnp.asarray(schedule),
             jax.random.PRNGKey(seed),
         )
 
@@ -325,6 +352,7 @@ class LIF(NeuronModel):
                 "n_synapses": int(weight.size),
                 "n_stimulated": int(stim_mask.sum()),
                 "n_silenced": int(silence_mask.sum()),
-                "rate_hz": rate_hz,
+                "rate_hz": None if stimulus.rate_schedule is not None else float(schedule_hz[0, 0]) if schedule_hz.size else None,
+                "rate_schedule": stimulus.rate_schedule is not None,
             },
         )
