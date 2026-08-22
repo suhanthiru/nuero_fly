@@ -13,8 +13,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import httpx
 import numpy as np
 
+from data.cell_types import ids_for
 from data.loader import load_connectome
 from viz import geometry
 from viz.palette import (
@@ -30,6 +32,22 @@ from viz.palette import (
 
 OUT = Path(__file__).resolve().parent.parent / "viz" / "frontend" / "public" / "scene"
 NM_PER_UM = 1000.0
+
+# Which cells get real morphology, and in what form.
+#
+# Skeletons for the populations: LC4 and LPLC2 are the giant fiber's two real inputs, and
+# what matters visually is the bundle, not any individual axon. Meshes for the cells whose
+# individual spiking is read out - the giant fiber itself and the motor neuron it drives -
+# because there are four of them in total and each one is an object worth seeing.
+#
+# LC6 and LC22 are deliberately absent. Phase 0 found they make zero synapses onto DNp01,
+# even unthresholded, so drawing them converging on it would be a lie.
+MORPHOLOGY: dict[str, str] = {
+    "LC4": "skeleton",
+    "LPLC2": "skeleton",
+    "DNp01": "mesh",
+    "TTMn": "mesh",
+}
 
 
 def main() -> None:
@@ -112,6 +130,62 @@ def main() -> None:
         )
     shell_layout = geometry.write_binary(OUT / "compartments.bin", shell_arrays)
 
+    # ---- morphology: skeletons for populations, meshes for identified cells ---------
+    print("\nfetching morphology ...")
+    morphology_arrays: dict[str, np.ndarray] = {}
+    groups = []
+    for cell_type, kind in MORPHOLOGY.items():
+        body_ids = ids_for(connectome, cell_type)
+        color = hex_to_rgb(CELL_TYPE_COLOR.get(cell_type, "#cccccc"))
+
+        if kind == "skeleton":
+            skeletons = geometry.fetch_skeletons(body_ids)
+            source, target, owner = geometry.skeletons_to_segments(skeletons)
+            morphology_arrays[f"{cell_type}/source"] = to_um(source)
+            morphology_arrays[f"{cell_type}/target"] = to_um(target)
+            morphology_arrays[f"{cell_type}/owner"] = owner
+            groups.append(
+                {
+                    "name": cell_type,
+                    "kind": "skeleton",
+                    "color": color,
+                    "n_neurons": len(skeletons),
+                    "n_requested": len(body_ids),
+                    "n_segments": int(owner.size),
+                }
+            )
+            print(
+                f"  {cell_type:<7} {len(skeletons):>3}/{len(body_ids):<3} skeletons, "
+                f"{owner.size:>7,} segments"
+            )
+        else:
+            bodies = []
+            with httpx.Client(timeout=300.0) as client:
+                for body_id in body_ids:
+                    mesh = geometry.fetch_neuron_mesh(int(body_id), client=client)
+                    if mesh is None:
+                        continue
+                    morphology_arrays[f"{cell_type}/{body_id}/position"] = to_um(
+                        mesh.positions
+                    )
+                    morphology_arrays[f"{cell_type}/{body_id}/index"] = mesh.indices.astype(
+                        np.uint32
+                    )
+                    bodies.append(
+                        {
+                            "body_id": int(body_id),
+                            "n_vertices": mesh.n_vertices,
+                            "n_triangles": mesh.n_triangles,
+                        }
+                    )
+            groups.append(
+                {"name": cell_type, "kind": "mesh", "color": color, "bodies": bodies}
+            )
+            total_tris = sum(b["n_triangles"] for b in bodies)
+            print(f"  {cell_type:<7} {len(bodies)} meshes, {total_tris:>7,} triangles")
+
+    morphology_layout = geometry.write_binary(OUT / "morphology.bin", morphology_arrays)
+
     geometry.write_manifest(
         OUT / "manifest.json",
         {
@@ -137,6 +211,11 @@ def main() -> None:
                 "file": "compartments.bin",
                 "layout": shell_layout,
                 "shells": shells,
+            },
+            "morphology": {
+                "file": "morphology.bin",
+                "layout": morphology_layout,
+                "groups": groups,
             },
             "palette": {
                 "stage": STAGE_COLOR,

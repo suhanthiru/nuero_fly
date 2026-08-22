@@ -114,6 +114,118 @@ def fetch_compartments(source: str = COMPARTMENTS) -> list[Mesh]:
         ]
 
 
+SKELETONS = "v1.0/segmentation/skeletons-malecns/skeletons-precomputed"
+NEURON_MESHES = "v1.0/segmentation/single-res-meshes"
+
+
+@dataclass(frozen=True)
+class Skeleton:
+    """A neuron's traced arbour as a vertex tree, in nanometres."""
+
+    body_id: int
+    vertices: np.ndarray   # (V, 3) float32
+    edges: np.ndarray      # (E, 2) uint32
+
+    @property
+    def n_vertices(self) -> int:
+        return int(self.vertices.shape[0])
+
+    @property
+    def n_edges(self) -> int:
+        return int(self.edges.shape[0])
+
+
+def parse_skeleton(blob: bytes, body_id: int) -> Skeleton:
+    """Decode one ``neuroglancer_skeletons`` file.
+
+        uint32                    vertex count
+        uint32                    edge count
+        float32[3 * vertices]     xyz, nanometres
+        uint32[2 * edges]         vertex index pairs
+    """
+    n_vertices, n_edges = struct.unpack("<II", blob[:8])
+    vertices = np.frombuffer(
+        blob, dtype="<f4", count=3 * n_vertices, offset=8
+    ).reshape(n_vertices, 3)
+    edges = np.frombuffer(
+        blob, dtype="<u4", count=2 * n_edges, offset=8 + 12 * n_vertices
+    ).reshape(n_edges, 2)
+    return Skeleton(body_id=body_id, vertices=vertices.copy(), edges=edges.copy())
+
+
+def fetch_skeletons(
+    body_ids, *, source: str = SKELETONS, workers: int = 16
+) -> list[Skeleton]:
+    """Fetch many skeletons concurrently.
+
+    Files are unsharded and addressed directly by body id, so this is just a few hundred
+    small independent GETs. Bodies with no traced skeleton return 404 and are skipped
+    rather than raising - not every proofread body has one.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(body_id: int, client: httpx.Client) -> Skeleton | None:
+        response = client.get(f"{BUCKET}/{source}/{body_id}")
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return parse_skeleton(response.content, body_id)
+
+    with httpx.Client(timeout=120.0, limits=httpx.Limits(max_connections=workers)) as client:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = pool.map(lambda b: one(int(b), client), list(body_ids))
+    return [skeleton for skeleton in results if skeleton is not None]
+
+
+def fetch_neuron_mesh(body_id: int, *, client: httpx.Client | None = None) -> Mesh | None:
+    """Full mesh for one neuron, from the legacy-format single-resolution source.
+
+    ``multi-res-meshes`` is sharded multi-LOD Draco and considerably harder to read;
+    ``single-res-meshes`` is plain legacy format, which is all we need for the handful of
+    cells that get real geometry.
+    """
+    owns = client is None
+    client = client or httpx.Client(timeout=300.0)
+    try:
+        manifest = client.get(f"{BUCKET}/{NEURON_MESHES}/{body_id}:0")
+        if manifest.status_code == 404:
+            return None
+        manifest.raise_for_status()
+        pieces = []
+        for fragment in manifest.json()["fragments"]:
+            blob = client.get(f"{BUCKET}/{NEURON_MESHES}/{fragment}").content
+            pieces.append(parse_ngmesh(blob, name=fragment))
+        return _concatenate(pieces, name=str(body_id))
+    finally:
+        if owns:
+            client.close()
+
+
+def skeletons_to_segments(
+    skeletons: list[Skeleton],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Flatten skeletons into line segments: source xyz, target xyz, and owner index.
+
+    deck.gl's LineLayer wants one source and one target per segment, so the tree structure
+    is expanded here rather than in the browser. The owner index lets the renderer colour
+    each segment by which neuron it belongs to - and later, drive its brightness from that
+    neuron's activity.
+    """
+    sources, targets, owners = [], [], []
+    for i, skeleton in enumerate(skeletons):
+        sources.append(skeleton.vertices[skeleton.edges[:, 0]])
+        targets.append(skeleton.vertices[skeleton.edges[:, 1]])
+        owners.append(np.full(skeleton.n_edges, i, dtype=np.uint16))
+    if not sources:
+        empty = np.empty((0, 3), dtype=np.float32)
+        return empty, empty, np.empty(0, dtype=np.uint16)
+    return (
+        np.concatenate(sources).astype(np.float32),
+        np.concatenate(targets).astype(np.float32),
+        np.concatenate(owners),
+    )
+
+
 def _concatenate(meshes: list[Mesh], name: str) -> Mesh:
     if len(meshes) == 1:
         return Mesh(name=name, positions=meshes[0].positions, indices=meshes[0].indices)
@@ -141,6 +253,13 @@ def soma_positions_nm(annotations) -> tuple[np.ndarray, np.ndarray]:
     return (xyz * SOMA_VOXEL_NM).astype(np.float32), have
 
 
+#: Every array starts on a multiple of this. JavaScript typed arrays refuse to view a
+#: buffer at an offset that is not a multiple of their element size - a Float32Array
+#: landing on an odd offset throws outright - and mixing uint8, uint16 and float32 arrays
+#: back to back guarantees that happens. 8 satisfies the widest element we write.
+BINARY_ALIGNMENT = 8
+
+
 def write_binary(path: Path, arrays: dict[str, np.ndarray]) -> dict[str, dict]:
     """Write several arrays into one flat binary blob, returning a layout manifest.
 
@@ -152,6 +271,10 @@ def write_binary(path: Path, arrays: dict[str, np.ndarray]) -> dict[str, dict]:
     offset = 0
     with path.open("wb") as fh:
         for key, array in arrays.items():
+            padding = (-offset) % BINARY_ALIGNMENT
+            if padding:
+                fh.write(b"\0" * padding)
+                offset += padding
             data = np.ascontiguousarray(array)
             blob = data.tobytes()
             layout[key] = {

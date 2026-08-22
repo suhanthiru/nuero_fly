@@ -12,7 +12,7 @@
  */
 
 import { Deck, OrbitView, type PickingInfo } from '@deck.gl/core';
-import { PointCloudLayer } from '@deck.gl/layers';
+import { LineLayer, PointCloudLayer } from '@deck.gl/layers';
 import { SimpleMeshLayer } from '@deck.gl/mesh-layers';
 
 import { loadScene, partition, type Scene } from './scene';
@@ -48,6 +48,7 @@ let scene: Scene;
 let viewState: ViewState = { ...INITIAL_VIEW };
 let showContext = true;
 let showShells = true;
+let showMorphology = true;
 let deck: Deck<any>;
 
 function centroid(positions: Float32Array): [number, number, number] {
@@ -61,6 +62,21 @@ function centroid(positions: Float32Array): [number, number, number] {
     z += positions[i * 3 + 2];
   }
   return [x / n, y / n, z / n];
+}
+
+function halfCentroid(points: Float32Array, xSign: number): [number, number, number] {
+  let x = 0;
+  let y = 0;
+  let z = 0;
+  let n = 0;
+  for (let i = 0; i < points.length / 3; i++) {
+    if (Math.sign(points[i * 3]) !== xSign) continue;
+    x += points[i * 3];
+    y += points[i * 3 + 1];
+    z += points[i * 3 + 2];
+    n++;
+  }
+  return n ? [x / n, y / n, z / n] : [0, 0, 0];
 }
 
 function buildLayers() {
@@ -87,6 +103,62 @@ function buildLayers() {
     }
   }
 
+  if (showMorphology) {
+    for (const bundle of scene.bundles) {
+      layers.push(
+        new LineLayer({
+          id: `bundle-${bundle.name}`,
+          data: {
+            length: bundle.count,
+            attributes: {
+              getSourcePosition: { value: bundle.source, size: 3 },
+              getTargetPosition: { value: bundle.target, size: 3 },
+            },
+          },
+          getColor: bundle.color,
+          getWidth: 1,
+          widthUnits: 'pixels',
+          widthMinPixels: 0.7,
+          // Low, because these bundles are dense by construction - that is the whole
+          // point of them - and additive segments overlapping in the glomerulus saturate
+          // to white at any higher value, erasing the LC4 / LPLC2 colour distinction.
+          opacity: 0.13,
+          pickable: false,
+          parameters: {
+            depthWriteEnabled: false,
+            blend: true,
+            blendColorOperation: 'add',
+            blendColorSrcFactor: 'src-alpha',
+            blendColorDstFactor: 'one',
+            blendAlphaOperation: 'add',
+            blendAlphaSrcFactor: 'one',
+            blendAlphaDstFactor: 'one',
+          },
+        }),
+      );
+    }
+
+    // The identified cells are drawn as solid geometry with depth, so they read as
+    // objects the bundles arrive at rather than as more lines in the tangle.
+    for (const neuron of scene.neuronMeshes) {
+      layers.push(
+        new SimpleMeshLayer({
+          id: `neuron-${neuron.name}-${neuron.bodyId}`,
+          data: [{ position: [0, 0, 0] }],
+          mesh: {
+            attributes: { POSITION: { value: neuron.positions, size: 3 } },
+            indices: { value: neuron.indices, size: 1 },
+          },
+          getPosition: (d: any) => d.position,
+          getColor: [...neuron.color, 235],
+          material: false,
+          pickable: false,
+          parameters: { depthWriteEnabled: true, cullMode: 'none' },
+        }),
+      );
+    }
+  }
+
   if (showContext) {
     layers.push(
       new PointCloudLayer({
@@ -104,7 +176,7 @@ function buildLayers() {
         // usable alpha - which inverts the whole hierarchy by making context brighter than
         // the pathway. Alpha blending caps at the source colour, so the rind stays slate
         // and dense regions read as solid rather than incandescent.
-        opacity: 0.62,
+        opacity: showMorphology ? 0.22 : 0.62,
         material: false,
         pickable: false,
         parameters: { depthWriteEnabled: false },
@@ -162,23 +234,59 @@ function flyTo(next: Partial<ViewState>) {
   render();
 }
 
-function presets() {
+/** Named camera framings, resolved once the geometry is loaded. */
+function buildViews(): Record<string, Partial<ViewState>> {
   const cv = scene.shells.find((s) => s.name === 'CV');
-  const neckTarget = cv ? centroid(cv.positions) : ([0, 0, 0] as [number, number, number]);
+  const neck = cv ? centroid(cv.positions) : ([0, 0, 0] as [number, number, number]);
+
+  // The right optic glomerulus, where the LC4 axons terminate onto the giant fiber's
+  // dendrite. Taken from the right-hemisphere half of the LC4 arbour's *terminal* ends:
+  // after recentring, Optic(R) sits at negative x.
+  const lc4 = scene.bundles.find((b) => b.name === 'LC4');
+  const glomerulus = lc4
+    ? halfCentroid(lc4.target, -1)
+    : ([0, 0, 0] as [number, number, number]);
+
+  return {
+    anterior: { target: [0, 0, 0], rotationX: 0, rotationOrbit: 0, zoom: 0.08 },
+    lateral: { target: [0, 0, 0], rotationX: 0, rotationOrbit: 90, zoom: 0.08 },
+    dorsal: { target: [0, 0, 0], rotationX: 88, rotationOrbit: 0, zoom: 0.08 },
+    neck: { target: neck, rotationX: 6, rotationOrbit: 28, zoom: 1.5 },
+    glomerulus: { target: glomerulus, rotationX: 12, rotationOrbit: -55, zoom: 2.2 },
+  };
+}
+
+/**
+ * Query parameters, so a specific framing can be captured without a keyboard.
+ * ``?view=glomerulus&context=0&shells=0`` is how the stills get taken.
+ */
+function applyUrlOverrides(views: Record<string, Partial<ViewState>>) {
+  const params = new URLSearchParams(window.location.search);
+  const name = params.get('view');
+  if (name && views[name]) viewState = { ...viewState, ...views[name] };
+  if (params.get('context') === '0') showContext = false;
+  if (params.get('shells') === '0') showShells = false;
+  if (params.get('morphology') === '0') showMorphology = false;
+}
+
+function presets(views: Record<string, Partial<ViewState>>) {
+  const byKey: Record<string, string> = {
+    '1': 'anterior',
+    '2': 'lateral',
+    '3': 'dorsal',
+    '4': 'neck',
+    '5': 'glomerulus',
+  };
 
   window.addEventListener('keydown', (event) => {
+    if (byKey[event.key]) {
+      flyTo(views[byKey[event.key]]);
+      return;
+    }
     switch (event.key) {
-      case '1': // anterior
-        flyTo({ target: [0, 0, 0], rotationX: 0, rotationOrbit: 0, zoom: 0.08 });
-        break;
-      case '2': // lateral
-        flyTo({ target: [0, 0, 0], rotationX: 0, rotationOrbit: 90, zoom: 0.08 });
-        break;
-      case '3': // dorsal
-        flyTo({ target: [0, 0, 0], rotationX: 88, rotationOrbit: 0, zoom: 0.08 });
-        break;
-      case '4': // the neck connective, framed on the giant fiber's descent
-        flyTo({ target: neckTarget, rotationX: 6, rotationOrbit: 28, zoom: 1.5 });
+      case 'm':
+        showMorphology = !showMorphology;
+        render();
         break;
       case 'c':
         showContext = !showContext;
@@ -240,7 +348,9 @@ async function main() {
     `${scene.shells.reduce((a, s) => a + s.n_triangles, 0).toLocaleString()} triangles`;
 
   buildLegend();
-  presets();
+  const views = buildViews();
+  applyUrlOverrides(views);
+  presets(views);
 
   deck = new Deck({
     canvas: 'canvas',

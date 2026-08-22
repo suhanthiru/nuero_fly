@@ -21,6 +21,16 @@ export interface ShellSpec {
   n_triangles: number;
 }
 
+export interface MorphologyGroup {
+  name: string;
+  kind: 'skeleton' | 'mesh';
+  color: [number, number, number];
+  n_neurons?: number;
+  n_requested?: number;
+  n_segments?: number;
+  bodies?: { body_id: number; n_vertices: number; n_triangles: number }[];
+}
+
 export interface Manifest {
   dataset: string;
   citation: string;
@@ -40,6 +50,11 @@ export interface Manifest {
     file: string;
     layout: Record<string, ArraySpec>;
     shells: ShellSpec[];
+  };
+  morphology: {
+    file: string;
+    layout: Record<string, ArraySpec>;
+    groups: MorphologyGroup[];
   };
   palette: {
     stage: Record<string, string>;
@@ -77,18 +92,39 @@ export interface Shell extends ShellSpec {
   indices: Uint32Array;
 }
 
+export interface SkeletonBundle {
+  name: string;
+  color: [number, number, number];
+  count: number;
+  source: Float32Array;
+  target: Float32Array;
+  owner: Uint16Array;
+  neurons: number;
+}
+
+export interface NeuronMesh {
+  name: string;
+  bodyId: number;
+  color: [number, number, number];
+  positions: Float32Array;
+  indices: Uint32Array;
+}
+
 export interface Scene {
   manifest: Manifest;
   somata: Somata;
   shells: Shell[];
+  bundles: SkeletonBundle[];
+  neuronMeshes: NeuronMesh[];
 }
 
 export async function loadScene(base = '/scene'): Promise<Scene> {
   const manifest: Manifest = await (await fetch(`${base}/manifest.json`)).json();
 
-  const [somataBuf, shellBuf] = await Promise.all([
+  const [somataBuf, shellBuf, morphBuf] = await Promise.all([
     fetch(`${base}/${manifest.somata.file}`).then((r) => r.arrayBuffer()),
     fetch(`${base}/${manifest.compartments.file}`).then((r) => r.arrayBuffer()),
+    fetch(`${base}/${manifest.morphology.file}`).then((r) => r.arrayBuffer()),
   ]);
 
   const sl = manifest.somata.layout;
@@ -110,7 +146,36 @@ export async function loadScene(base = '/scene'): Promise<Scene> {
     indices: view(shellBuf, cl[`${spec.name}/index`]),
   }));
 
-  return { manifest, somata, shells };
+  const ml = manifest.morphology.layout;
+  const bundles: SkeletonBundle[] = [];
+  const neuronMeshes: NeuronMesh[] = [];
+
+  for (const group of manifest.morphology.groups) {
+    if (group.kind === 'skeleton') {
+      const owner = view(morphBuf, ml[`${group.name}/owner`]);
+      bundles.push({
+        name: group.name,
+        color: group.color,
+        count: owner.length,
+        source: view(morphBuf, ml[`${group.name}/source`]),
+        target: view(morphBuf, ml[`${group.name}/target`]),
+        owner,
+        neurons: group.n_neurons ?? 0,
+      });
+    } else {
+      for (const body of group.bodies ?? []) {
+        neuronMeshes.push({
+          name: group.name,
+          bodyId: body.body_id,
+          color: group.color,
+          positions: view(morphBuf, ml[`${group.name}/${body.body_id}/position`]),
+          indices: view(morphBuf, ml[`${group.name}/${body.body_id}/index`]),
+        });
+      }
+    }
+  }
+
+  return { manifest, somata, shells, bundles, neuronMeshes };
 }
 
 /**
