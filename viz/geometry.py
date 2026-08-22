@@ -114,6 +114,32 @@ def fetch_compartments(source: str = COMPARTMENTS) -> list[Mesh]:
         ]
 
 
+def decimate(mesh: Mesh, max_triangles: int) -> Mesh:
+    """Reduce a mesh to at most ``max_triangles``, via quadric edge collapse.
+
+    These meshes come straight out of an EM segmentation and are tessellated for accuracy,
+    not for display: the two giant fibers alone arrive as 3.7 million triangles. At screen
+    scale that detail is invisible, but it costs both download size and frame rate, so it
+    is thrown away here rather than in the browser.
+    """
+    if mesh.n_triangles <= max_triangles:
+        return mesh
+    try:
+        import fast_simplification
+    except ImportError:  # optional; the viewer still works with full-resolution meshes
+        return mesh
+
+    reduction = 1.0 - (max_triangles / mesh.n_triangles)
+    positions, indices = fast_simplification.simplify(
+        mesh.positions.astype(np.float32), mesh.indices.astype(np.uint32), reduction
+    )
+    return Mesh(
+        name=mesh.name,
+        positions=np.ascontiguousarray(positions, dtype=np.float32),
+        indices=np.ascontiguousarray(indices, dtype=np.uint32),
+    )
+
+
 SKELETONS = "v1.0/segmentation/skeletons-malecns/skeletons-precomputed"
 NEURON_MESHES = "v1.0/segmentation/single-res-meshes"
 

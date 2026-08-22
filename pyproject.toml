@@ -17,7 +17,7 @@ dependencies = [
 gpu = ["jax[cuda12]>=0.10"]
 cpu = ["jax>=0.10"]
 # Phase 4 only. Phases 0-1 must install and run without this.
-viz = ["cloud-volume>=8.32"]
+viz = ["cloud-volume>=8.32", "fast-simplification>=0.2"]
 
 [dependency-groups]
 dev = ["pytest>=8", "matplotlib>=3.8"]

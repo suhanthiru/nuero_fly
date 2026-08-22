@@ -79,8 +79,12 @@ function halfCentroid(points: Float32Array, xSign: number): [number, number, num
   return n ? [x / n, y / n, z / n] : [0, 0, 0];
 }
 
+// partition() walks all 140k somata and allocates five typed arrays. It depends only on
+// the scene, never on the camera, so it is computed once.
+let cachedParts: ReturnType<typeof partition> | null = null;
+
 function buildLayers() {
-  const parts = partition(scene.somata);
+  const parts = (cachedParts ??= partition(scene.somata));
   const layers: any[] = [];
 
   if (showShells) {
@@ -153,7 +157,8 @@ function buildLayers() {
           getColor: [...neuron.color, 235],
           material: false,
           pickable: false,
-          parameters: { depthWriteEnabled: true, cullMode: 'none' },
+          // Closed surfaces, so culling back faces halves fragment work for free.
+          parameters: { depthWriteEnabled: true, cullMode: 'back' },
         }),
       );
     }
@@ -225,13 +230,29 @@ function showHover(info: PickingInfo, lookup: Uint32Array) {
   el.style.top = `${info.y + 14}px`;
 }
 
+let layerCache: any[] | null = null;
+
+/** Rebuild the layer list. Only call this when a toggle changes what is drawn. */
 function render() {
-  deck.setProps({ layers: buildLayers(), viewState });
+  layerCache = buildLayers();
+  deck.setProps({ layers: layerCache, viewState });
+}
+
+/**
+ * Camera-only update.
+ *
+ * Deliberately does NOT rebuild layers. Reconstructing them on every camera frame means
+ * re-running the 140k-soma partition and handing deck.gl freshly allocated binary
+ * attributes sixty times a second, which it then has to diff and re-upload - and that
+ * made orbiting unusable.
+ */
+function updateCamera() {
+  deck.setProps({ viewState });
 }
 
 function flyTo(next: Partial<ViewState>) {
   viewState = { ...viewState, ...next };
-  render();
+  updateCamera();
 }
 
 /** Named camera framings, resolved once the geometry is loaded. */
@@ -364,7 +385,7 @@ async function main() {
     controller: { inertia: 250 },
     onViewStateChange: ({ viewState: next }: any) => {
       viewState = next;
-      render();
+      updateCamera();
     },
     parameters: { clearColor: [0.031, 0.035, 0.043, 1] },
     layers: buildLayers(),

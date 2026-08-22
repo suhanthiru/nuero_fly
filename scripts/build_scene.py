@@ -33,6 +33,12 @@ from viz.palette import (
 OUT = Path(__file__).resolve().parent.parent / "viz" / "frontend" / "public" / "scene"
 NM_PER_UM = 1000.0
 
+# Triangle budgets for display. The EM meshes are tessellated for accuracy rather than for
+# rendering - the two giant fibers alone arrive as 3.7M triangles - and at screen scale that
+# detail is invisible while costing both download size and frame rate.
+MAX_TRIANGLES_NEURON = 150_000
+MAX_TRIANGLES_SHELL = 120_000
+
 # Which cells get real morphology, and in what form.
 #
 # Skeletons for the populations: LC4 and LPLC2 are the giant fiber's two real inputs, and
@@ -60,7 +66,10 @@ def main() -> None:
     annotations = connectome.annotations
 
     print("fetching compartment meshes ...")
-    meshes = geometry.fetch_compartments()
+    meshes = [
+        geometry.decimate(mesh, MAX_TRIANGLES_SHELL)
+        for mesh in geometry.fetch_compartments()
+    ]
     for mesh in meshes:
         low, high = mesh.bounds()
         print(
@@ -165,6 +174,7 @@ def main() -> None:
                     mesh = geometry.fetch_neuron_mesh(int(body_id), client=client)
                     if mesh is None:
                         continue
+                    mesh = geometry.decimate(mesh, MAX_TRIANGLES_NEURON)
                     morphology_arrays[f"{cell_type}/{body_id}/position"] = to_um(
                         mesh.positions
                     )
