@@ -74,6 +74,21 @@ class LIFParams:
     # Free parameter in the original model.
     w_synapse: float = 0.275     # mV per synapse
 
+    #: How each neuron's input is scaled by its own size.
+    #:
+    #: "uniform" is Shiu et al.'s assumption: every neuron gets the same membrane time
+    #: constant and the same 7 mV gap to threshold, whatever its size. That is what Phase 2
+    #: found saturating - one LC4 spike delivers 13.9 mV to the giant fiber, so ~3 coincident
+    #: spikes fire one of the largest neurons in the animal.
+    #:
+    #: "synapse_count" divides each neuron's incoming weights by its own total input synapse
+    #: count, normalised to the population median. That is equivalent to scaling membrane
+    #: capacitance with membrane area, using synapse count as the area proxy - a cell with
+    #: ten times the synapses needs ten times the coincident input to reach threshold. It is
+    #: still a proxy, and it is our choice, but it is a far weaker assumption than treating
+    #: the giant fiber and a Kenyon cell as electrically identical.
+    capacitance_mode: str = "uniform"
+
     poisson_rate_hz: float = 150.0
     poisson_scale: float = 250.0  # stimulation weight = w_synapse * poisson_scale
 
@@ -114,6 +129,29 @@ def _decay_coefficients(params: LIFParams) -> tuple[float, float, float]:
             "degenerate when they are equal"
         )
     return float(np.exp(-a * params.dt)), float(np.exp(-b * params.dt)), float(a / (a - b))
+
+
+def _capacitance_scale(params: LIFParams, weights: sp.csr_matrix) -> np.ndarray:
+    """Per-neuron divisor applied to incoming synaptic weight.
+
+    Returns all ones under the uniform assumption. Under "synapse_count" it returns each
+    neuron's total input synapses relative to the population median, so the same presynaptic
+    spike moves a large cell less than a small one.
+
+    Neurons with no input get a scale of 1 rather than 0, and the result is floored, so a
+    sparsely-innervated cell is never made pathologically excitable by the normalisation.
+    """
+    n = weights.shape[0]
+    if params.capacitance_mode == "uniform":
+        return np.ones(n, dtype=np.float32)
+    if params.capacitance_mode != "synapse_count":
+        raise ValueError(f"unknown capacitance_mode {params.capacitance_mode!r}")
+
+    incoming = np.abs(weights).sum(axis=1).A1
+    live = incoming[incoming > 0]
+    median = float(np.median(live)) if live.size else 1.0
+    scale = np.where(incoming > 0, incoming / max(median, 1e-9), 1.0)
+    return np.maximum(scale, 0.05).astype(np.float32)
 
 
 def _csr_to_coo_arrays(weights: sp.csr_matrix) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -255,6 +293,7 @@ class LIF(NeuronModel):
 
         post_idx, pre_idx, synapse_count = _csr_to_coo_arrays(weights)
         weight = synapse_count * params.w_synapse
+        weight = weight / _capacitance_scale(params, weights)[post_idx]
 
         stim_idx = np.asarray(stimulus.poisson_targets, dtype=np.int32).reshape(-1)
         stim_mask = np.zeros(n_neurons, dtype=bool)
@@ -352,6 +391,7 @@ class LIF(NeuronModel):
                 "seed": seed,
                 "n_neurons": n_neurons,
                 "n_synapses": int(weight.size),
+                "capacitance_mode": params.capacitance_mode,
                 "n_stimulated": int(stim_mask.sum()),
                 "n_silenced": int(silence_mask.sum()),
                 "rate_hz": None if stimulus.rate_schedule is not None else float(schedule_hz[0, 0]) if schedule_hz.size else None,

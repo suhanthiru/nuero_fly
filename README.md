@@ -50,6 +50,54 @@ does not, and the sweep says why rather than just that.
 Reproduce with `scripts/escape_sweep.py`, `scripts/diagnose_heading.py` and
 `scripts/plot_escape.py`.
 
+### Neuron-model ablation: the wiring is not what is limiting this
+
+Phases 2 and 3 both ended by blaming the neuron model - saturation at nominal gain, and a
+decision signal too small to carry a direction. `NeuronModel` was an interface from Phase 1
+precisely so those could be tested, so they were: the same connectome, the same looming
+task, four dynamics.
+
+| arm | GF spikes (gain 1.0) | tracks l/\|v\| at gain 1.0 | at gain 0.03 |
+|---|---|---|---|
+| `lif-uniform` (Shiu et al.) | 153 | no (1.5 ms spread) | yes |
+| `lif-capacitance` | 0 | silent | silent |
+| `conductance` | 173 | no (1.6 ms spread) | yes |
+| `conductance-cap` | 0 | silent | silent |
+| `rate` | 50 | **yes** (219 ms spread) | silent |
+
+Four things came out of it, and none of them is "model X wins".
+
+**Conductance synapses do not fix the saturation.** This was the obvious physiological
+hypothesis - reversal potentials bound the drive, so excitation should stop accumulating.
+It does not help: 173 GF spikes against 153, and the escape *latency* agrees with the
+current-based model to within 1.3 ms in every single condition tested. The extra biophysical
+realism buys nothing on this task, which is a useful negative for anyone about to spend
+effort on it.
+
+**Capacitance scaling brackets the answer rather than settling it.** DNp01 has 15,484 input
+synapses against a population median of 202. Under the uniform assumption that means ~3.4
+coincident LC4 spikes fire the giant fiber; under full synapse-count normalisation it needs
+~264, which is more than the LC populations can deliver, so it never fires. The real cell is
+somewhere inside that 78-fold bracket and **nothing in the connectome says where** - synapse
+count is a proxy for membrane area, and the relation between area and excitability is not
+something an EM volume measures.
+
+**Each model has its own operating window, and they do not overlap.** The rate model is the
+only arm that behaves at the nominal encoder gain, and it is the only one that goes silent
+at the reduced gain the demo defaults to. So the Phase 2 conclusion generalises: the latency
+scaling is conditional not on the encoder gain alone but on the *joint* choice of gain and
+neuron model, and the two trade off against each other. There is no setting at which all
+four agree, and no data here to choose between them.
+
+**No arm produces the mode split.** Every escape in every model is giant-fiber mediated,
+which confirms the Phase 3 structural finding: in this connectome TTMn is reachable
+essentially only through the GF and its coupled interneurons, so there is no second route
+for a neuron model to find. That result is about the wiring, and it is the one conclusion
+here that survives changing the dynamics.
+
+Reproduce with `scripts/model_ablation.py`, `scripts/compare_models.py` and
+`scripts/diagnose_capacitance.py`.
+
 ### Running the demo
 
 ```
