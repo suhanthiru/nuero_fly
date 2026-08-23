@@ -20,7 +20,35 @@ Phase 0 (connectome loader), Phase 1 (LIF core, validated against the Shiu et al
 implementation), Phase 2 (analytic looming encoder and the l/|v| sweep), and the live demo:
 the 3D viewer is now driven by simulated activity.
 
-Phase 3 (MuJoCo physics) is not built - `world/` is empty.
+Phase 3 (MuJoCo arena, scripted predator, escape adjudication).
+
+### Phase 3 result: escape timing works, escape direction does not
+
+The exit criterion asked whether the fly escapes preferentially away from the threat. It
+does not, and the sweep says why rather than just that.
+
+* **Takeoff happens.** The circuit fires on essentially every approach, at every azimuth.
+* **Direction is noise.** Mean error from "directly away" is 96 degrees with the hemisphere
+  weighting off and 80 degrees with it on, against 90 degrees for chance. Headings scatter
+  across ~345 degrees in both conditions.
+* **The cause is the size of the decision signal.** The heading is read from the left/right
+  giant fiber asymmetry, and there are only ~6 GF spikes per trial across both cells. The
+  trial-to-trial spread of that asymmetry at a *fixed* azimuth is nearly as large as its
+  spread *across* azimuths - a signal-to-noise ratio of about 1.5. Which giant fiber happens
+  to receive more Poisson events decides the heading.
+* **The hand-added weighting does work, and is still not enough.** With it on, the L/R
+  asymmetry does correlate with sin(azimuth) at r = +0.55, so real directional information
+  reaches the giant fibers. It is simply swamped at this spike count.
+* **Escape success (47-58%) is geometry, not computation.** A fly jumping in a roughly fixed
+  direction escapes frontal threats and is caught by rear ones, which is exactly the shape
+  of the success-vs-azimuth curve.
+* **A persistent left bias** shows up in the null: 4.3 left GF spikes against 2.8 right.
+  That traces to the anatomical asymmetry Phase 0 found - 71 LC4 on the left against 55 on
+  the right - which is more likely a proofreading difference between the two optic lobes
+  than biology, and is a caution about any left/right claim from this dataset.
+
+Reproduce with `scripts/escape_sweep.py`, `scripts/diagnose_heading.py` and
+`scripts/plot_escape.py`.
 
 ### Running the demo
 

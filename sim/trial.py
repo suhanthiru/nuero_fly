@@ -16,7 +16,12 @@ import numpy as np
 
 from data.cell_types import ids_for
 from .decoder import TakeoffEvent, decode
-from .encoders.analytic import AnalyticLoomingEncoder, LoomingTrajectory, LoomingTuning
+from .encoders.analytic import (
+    AnalyticLoomingEncoder,
+    LoomingTrajectory,
+    LoomingTuning,
+    _hemisphere_weight,
+)
 from .lif import LIF, LIFParams
 from .neuron import StimulusSpec
 from .recorder import Recording, SceneTrace, record
@@ -33,6 +38,11 @@ class TrialSpec:
     azimuth_deg: float = 0.0
     gain_scale: float = 0.03        # see note below
     seed: int = 0
+    #: Whether the two optic lobes are driven differently by an off-axis stimulus. Off by
+    #: default because the weighting is hand-added scaffolding, not something the model
+    #: derives - with it off both hemispheres get identical drive and the escape has no
+    #: directional preference at all, which is the correct null to compare against.
+    azimuth_weighting: bool = False
 
     def trajectory(self) -> LoomingTrajectory:
         speed = self.radius_mm / self.ratio_ms
@@ -77,13 +87,29 @@ def run_looming_trial(
         lplc2_max_hz=150.0 * spec.gain_scale,
         max_rate_hz=max(150.0 * spec.gain_scale, 1e-6),
     )
-    encoder = AnalyticLoomingEncoder.from_connectome(connectome, tuning=tuning)
+    encoder = AnalyticLoomingEncoder.from_connectome(
+        connectome, tuning=tuning, azimuth_weighting=spec.azimuth_weighting
+    )
     targets = encoder.target_ids()
     target_idx = connectome.indices_of(np.asarray(targets))
 
     trajectory = spec.trajectory()
     is_lc4 = np.array([b in encoder.lc4_ids for b in targets])
     is_lplc2 = np.array([b in encoder.lplc2_ids for b in targets])
+
+    # Per-neuron gain from which eye the stimulus favours. Uniform unless azimuth weighting
+    # is enabled, in which case the two hemispheres diverge and the motor output can become
+    # asymmetric - the only route to a heading in this model.
+    if spec.azimuth_weighting:
+        sides = [
+            encoder.lc4_ids.get(b) or encoder.lplc2_ids.get(b) or "" for b in targets
+        ]
+        eye_gain = np.array(
+            [_hemisphere_weight(spec.azimuth_deg, side) for side in sides],
+            dtype=np.float32,
+        )
+    else:
+        eye_gain = np.ones(len(targets), dtype=np.float32)
 
     schedule = np.zeros((n_steps, len(targets)), dtype=np.float32)
     theta = np.zeros(n_steps, dtype=np.float32)
@@ -95,8 +121,8 @@ def run_looming_trial(
         theta[step] = th
         theta_dot[step] = thd
         distance[step] = scene.distance_mm
-        schedule[step, is_lc4] = lc4_hz
-        schedule[step, is_lplc2] = lplc2_hz
+        schedule[step, is_lc4] = lc4_hz * eye_gain[is_lc4]
+        schedule[step, is_lplc2] = lplc2_hz * eye_gain[is_lplc2]
 
     # Record every cell type the caller wants to display, in a stable order.
     body_ids: list[int] = []
@@ -115,14 +141,18 @@ def run_looming_trial(
         record=record_idx,
     )
 
-    def indices_for(pattern: str) -> np.ndarray:
-        return connectome.indices_of(ids_for(connectome, pattern))
+    def indices_for(pattern: str, side: str | None = None) -> np.ndarray:
+        return connectome.indices_of(ids_for(connectome, pattern, side=side))
 
     event = decode(
         result.spike_times,
         gf_indices=indices_for("DNp01"),
         ttm_indices=indices_for("TTMn"),
         collision_ms=spec.collision_ms,
+        ttm_left=indices_for("TTMn", side="L"),
+        ttm_right=indices_for("TTMn", side="R"),
+        gf_left=indices_for("DNp01", side="L"),
+        gf_right=indices_for("DNp01", side="R"),
     )
 
     recording = record(
@@ -143,6 +173,12 @@ def run_looming_trial(
             "latency_to_collision_ms": event.latency_to_collision_ms,
             "gf_spike_count": event.gf_spike_count,
             "ttm_spike_count": event.ttm_spike_count,
+            "ttm_left_count": event.ttm_left_count,
+            "ttm_right_count": event.ttm_right_count,
+            "left_count": event.left_count,
+            "right_count": event.right_count,
+            "heading_deg": event.heading_deg,
+            "heading_source": event.heading_source,
         },
         extra_meta={"trial": spec.__dict__, "tuning": tuning.__dict__},
     )
