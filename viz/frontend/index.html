@@ -73,6 +73,13 @@
       #hud td:first-child { color: var(--dim); padding-right: 12px; }
       #hud td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
       #hud .fired { color: #f43f5e; }
+      #worldhud { top: 14px; left: 14px; min-width: 168px; }
+      #worldhud table { border-collapse: collapse; font-size: 10px; }
+      #worldhud td { padding: 1px 0; }
+      #worldhud td:first-child { color: var(--dim); padding-right: 14px; }
+      #worldhud td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+      #worldhud .fired { color: #f43f5e; }
+      #worldhud .ok { color: #4ade80; }
 
       #keys { bottom: 14px; left: 14px; color: var(--dim); font-size: 10px; }
       #keys b { color: var(--ink); font-weight: 500; }
@@ -151,9 +158,18 @@
           </table>
         </div>
         <div class="overlay" id="keys">
-          <b>drag</b> orbit &nbsp; <b>1</b>–<b>5</b> views &nbsp;
-          <b>c</b> context &nbsp; <b>s</b> shells &nbsp; <b>m</b> morphology &nbsp;
-          <b>space</b> play
+          <b>drag</b> orbit &nbsp; <b>w</b> world &nbsp; <b>b</b> brain &nbsp;
+          <b>f</b> follow &nbsp; <b>1</b>–<b>5</b> views &nbsp; <b>c</b> context &nbsp;
+          <b>s</b> shells &nbsp; <b>m</b> morphology &nbsp; <b>space</b> play
+        </div>
+        <div class="overlay" id="worldhud" hidden>
+          <table>
+            <tr><td>outcome</td><td id="world-outcome">—</td></tr>
+            <tr><td>fly</td><td id="world-state">—</td></tr>
+            <tr><td>closest</td><td id="world-closest">—</td></tr>
+            <tr><td>approach</td><td id="world-azimuth">—</td></tr>
+            <tr><td>escape dir</td><td id="world-heading">—</td></tr>
+          </table>
         </div>
       </div>
 
@@ -170,6 +186,7 @@
 
       <div id="tracewrap">
         <div id="controls">
+          <button id="mode">show world</button>
           <button id="playpause">pause</button>
           <label>dilation <input id="speed" type="range" min="-3.3" max="0" step="0.05" /></label>
           <span id="speed-label">—</span>

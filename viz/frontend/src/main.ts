@@ -24,6 +24,7 @@ import { ArenaPanel } from './arena';
 import { loadScene, partition, type Scene } from './scene';
 import { ActivityIndex, Stream, type Frame, type Hello } from './stream';
 import { TracePanel } from './traces';
+import { WorldScene, type World } from './world';
 
 const STREAM_URL = `ws://${location.hostname}:8000/stream`;
 
@@ -69,6 +70,23 @@ let viewState: ViewState = { ...INITIAL_VIEW };
 let showContext = true;
 let showShells = true;
 let showMorphology = true;
+
+// The world view is a second camera on the same simulation: step N here is step N of the
+// spike train. It keeps its own camera because the two scenes are different coordinate
+// spaces entirely - micrometres of brain against millimetres of arena.
+type Mode = 'brain' | 'world';
+let mode: Mode = 'brain';
+let worldScene: WorldScene | null = null;
+let followFly = true;
+const WORLD_VIEW = {
+  target: [0, 0, 0] as [number, number, number],
+  rotationX: 22,
+  rotationOrbit: -40,
+  zoom: 2.9,
+  minZoom: -1,
+  maxZoom: 8,
+};
+let worldViewState: ViewState = { ...WORLD_VIEW };
 
 let parts: ReturnType<typeof partition>;
 let staticLayers: any[] | null = null;
@@ -274,6 +292,23 @@ function buildActivityLayers(frame: Frame | null): any[] {
 }
 
 function redraw(): void {
+  if (mode === 'world') {
+    const step = lastStep < 0 ? 0 : lastStep;
+    if (worldScene) {
+      // Driven from the step rather than from a received frame, so a deep link shows the
+      // right state before the first network frame lands.
+      text('world-state', worldScene.hasLaunched(step) ? 'airborne' : 'on the ground');
+    }
+    if (followFly && worldScene) {
+      const fly = worldScene.flyPosition(step);
+      worldViewState = { ...worldViewState, target: [fly[0], fly[1], fly[2]] };
+    }
+    deck.setProps({
+      layers: worldScene ? worldScene.layers(step) : [],
+      viewState: worldViewState as any,
+    });
+    return;
+  }
   staticLayers ??= buildStaticLayers();
   deck.setProps({
     layers: [...staticLayers, ...buildActivityLayers(stream.frame)],
@@ -288,7 +323,19 @@ function invalidateStatic(): void {
 
 /** Camera-only update: deliberately does not rebuild layers. */
 function updateCamera(): void {
-  deck.setProps({ viewState: viewState as any });
+  deck.setProps({
+    viewState: (mode === 'world' ? worldViewState : viewState) as any,
+  });
+}
+
+function setMode(next: Mode): void {
+  mode = next;
+  const button = document.getElementById('mode') as HTMLButtonElement | null;
+  if (button) button.textContent = mode === 'brain' ? 'show world' : 'show brain';
+  document.getElementById('title')!.hidden = mode !== 'brain';
+  document.getElementById('rail')!.style.display = mode === 'brain' ? '' : 'none';
+  document.getElementById('worldhud')!.hidden = mode !== 'world';
+  redraw();
 }
 
 function flyTo(next: Partial<ViewState>): void {
@@ -440,6 +487,9 @@ function wireControls(): void {
   speed.value = String(Math.log10(0.02));
   speed.oninput = applySpeed;
 
+  const modeButton = document.getElementById('mode') as HTMLButtonElement;
+  modeButton.onclick = () => setMode(mode === 'brain' ? 'world' : 'brain');
+
   document.getElementById('rerun')!.addEventListener('click', () => {
     const ratio = Number((document.getElementById('ratio') as HTMLInputElement).value);
     const gain = Number((document.getElementById('gain') as HTMLInputElement).value);
@@ -461,6 +511,12 @@ function wireControls(): void {
       case ' ':
         event.preventDefault();
         playpause.click();
+        break;
+      case 'w': setMode('world'); break;
+      case 'b': setMode('brain'); break;
+      case 'f':
+        followFly = !followFly;
+        redraw();
         break;
       case 'm': showMorphology = !showMorphology; invalidateStatic(); break;
       case 'c': showContext = !showContext; invalidateStatic(); break;
@@ -512,7 +568,8 @@ async function main(): Promise<void> {
     useDevicePixels: true,
     controller: { inertia: 250 },
     onViewStateChange: ({ viewState: next }: any) => {
-      viewState = next;
+      if (mode === 'world') worldViewState = next;
+      else viewState = next;
       updateCamera();
     },
     parameters: { clearColor: [0.031, 0.035, 0.043, 1] } as any,
@@ -529,6 +586,17 @@ async function main(): Promise<void> {
 
   stream.whenReady((hello) => {
     index = new ActivityIndex(hello, scene.somata.bodyId, parts.pathway.index);
+    const world = (hello as any).world as World | null;
+    worldScene = world ? new WorldScene(world) : null;
+    worldViewState = { ...WORLD_VIEW };
+    if (world) {
+      text('world-outcome', world.escaped ? 'ESCAPED' : 'CAUGHT');
+      document.getElementById('world-outcome')!.className =
+        world.escaped ? 'ok' : 'fired';
+      text('world-closest', `${world.closest_approach_mm.toFixed(1)} mm`);
+      text('world-azimuth', `${world.azimuth_deg.toFixed(0)}°`);
+      text('world-heading', `${world.heading_deg.toFixed(0)}°`);
+    }
     configureTraces(hello);
     lastStep = -1;
     startDistance = 1;
@@ -539,7 +607,12 @@ async function main(): Promise<void> {
       const step = Math.round(Number(seekTo) / hello.dt_ms);
       stream.seek(step);
       if (params.get('pause') !== '0') stream.pause();
+      // Apply it locally too. The server's acknowledging frame is a network round trip
+      // away, and a deep link should show its moment immediately rather than sitting at
+      // step 0 until one arrives.
+      lastStep = step;
     }
+    if (params.get('mode') === 'world') setMode('world');
     const view = params.get('view');
     if (view) {
       const views = buildViews();

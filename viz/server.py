@@ -49,6 +49,10 @@ class DemoState:
     aggregates: dict[str, np.ndarray]
     palette: dict[str, str]
     display_scale: float = 1.0
+    #: Physics for the same trial: fly and predator paths on the neural clock, plus the
+    #: outcome. Sent once with hello rather than per frame - the client already knows the
+    #: current step, so it can index the paths itself.
+    world: dict[str, Any] | None = None
     playback: Playback = field(default_factory=Playback)
     busy: str | None = None
     rerun: Any = None  # callable(ratio_ms, gain_scale, seed) -> (Recording, event)
@@ -105,11 +109,24 @@ def build_app(state: DemoState) -> FastAPI:
             payload["theta_dot"] = np.round(scene.theta_dot_deg_per_ms[picks], 5).tolist()
         return payload
 
+    def world_payload() -> dict | None:
+        """Decimate the physics paths onto the same stride the traces use."""
+        if state.world is None:
+            return None
+        stride = 8
+        payload = dict(state.world)
+        for key in ("fly", "predator"):
+            path = np.asarray(payload[key])
+            payload[key] = np.round(path[::stride], 4).tolist()
+        payload["stride"] = stride
+        return payload
+
     def hello() -> dict:
         recording = state.recording
         scene = recording.scene
         return {
             "history": history(),
+            "world": world_payload(),
             "type": "hello",
             "body_ids": [str(b) for b in recording.body_ids],
             "cell_types": recording.cell_types,
@@ -236,6 +253,8 @@ def build_app(state: DemoState) -> FastAPI:
             state.recording = recording
             state.aggregates = recording.aggregate_by_type()
             state.display_scale = display_scale_for(recording.activity)
+            # The physics belongs to this trial, so it has to move with it.
+            state.world = recording.meta.get("world")
             state.playback.step = 0
             state.playback.playing = True
         finally:

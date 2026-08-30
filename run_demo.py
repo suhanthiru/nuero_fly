@@ -17,8 +17,12 @@ import argparse
 
 import uvicorn
 
+import numpy as np
+
 from data.loader import load_connectome
 from sim.trial import TrialSpec, run_looming_trial
+from world.arena import FLY_HALF_LENGTH_M, FLY_HALF_WIDTH_M, Arena
+from world.predator import MM_PER_M, ApproachTrajectory
 from viz.palette import CELL_TYPE_COLOR
 from viz.server import DemoState, build_app, display_scale_for
 
@@ -33,6 +37,8 @@ def main() -> None:
     parser.add_argument("--ratio", type=float, default=40.0, help="l/|v| in ms")
     parser.add_argument("--gain", type=float, default=0.03, help="encoder gain scale")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--azimuth", type=float, default=35.0,
+                        help="approach bearing in degrees; 0 is head-on")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
@@ -41,7 +47,10 @@ def main() -> None:
     connectome = load_connectome(args.dataset)
 
     def simulate(ratio_ms: float, gain_scale: float, seed: int):
-        spec = TrialSpec(ratio_ms=ratio_ms, gain_scale=gain_scale, seed=seed)
+        spec = TrialSpec(
+            ratio_ms=ratio_ms, gain_scale=gain_scale, seed=seed,
+            azimuth_deg=args.azimuth, azimuth_weighting=True,
+        )
         print(f"simulating l/|v|={ratio_ms:g} ms, gain={gain_scale:g}, seed={seed} ...")
         recording, event = run_looming_trial(
             connectome, spec=spec, record_types=RECORD_TYPES
@@ -52,6 +61,41 @@ def main() -> None:
             f"TTMn spikes={event.ttm_spike_count}  "
             f"latency={'n/a' if latency is None else f'{latency:.1f} ms'}"
         )
+        # Physics for the same approach. Run here rather than inside sim/, which must not
+        # import world/ - the layering rule from the build spec.
+        trajectory = ApproachTrajectory(
+            ratio_ms=spec.ratio_ms, radius_mm=spec.radius_mm,
+            azimuth_deg=spec.azimuth_deg, collision_ms=spec.collision_ms,
+        )
+        takeoff = (
+            event.gf_spike_ms if event.gf_spike_ms is not None else event.ttm_spike_ms
+        )
+        outcome = Arena(trajectory).run(
+            takeoff_ms=takeoff, heading_deg=event.heading_deg,
+            duration_ms=spec.duration_ms,
+        )
+        print(
+            f"  escaped={outcome.escaped}  closest={outcome.closest_approach_mm:.2f} mm  "
+            f"heading={event.heading_deg:.0f} deg  azimuth={spec.azimuth_deg:.0f} deg"
+        )
+
+        recording.meta["world"] = {
+            "fly": (outcome.path * MM_PER_M).tolist(),
+            "predator": (outcome.predator_path * MM_PER_M).tolist(),
+            "predator_radius_mm": spec.radius_mm,
+            "fly_size_mm": [
+                FLY_HALF_LENGTH_M * MM_PER_M,
+                FLY_HALF_WIDTH_M * MM_PER_M,
+                FLY_HALF_WIDTH_M * MM_PER_M,
+            ],
+            "takeoff_step": (
+                None if takeoff is None else int(round(takeoff / recording.dt_ms))
+            ),
+            "escaped": bool(outcome.escaped),
+            "closest_approach_mm": float(outcome.closest_approach_mm),
+            "azimuth_deg": float(spec.azimuth_deg),
+            "heading_deg": float(event.heading_deg),
+        }
         return recording, event
 
     recording, _ = simulate(args.ratio, args.gain, args.seed)
@@ -61,6 +105,7 @@ def main() -> None:
         aggregates=recording.aggregate_by_type(),
         palette=dict(CELL_TYPE_COLOR),
         display_scale=display_scale_for(recording.activity),
+        world=recording.meta.get("world"),
         rerun=lambda ratio, gain, seed: simulate(ratio, gain, seed),
     )
 

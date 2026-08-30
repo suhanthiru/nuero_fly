@@ -41,7 +41,10 @@ FLY_MASS_KG = 1e-6
 TAKEOFF_SPEED_M_PER_S = 0.35
 TAKEOFF_ELEVATION_DEG = 45.0
 
-PHYSICS_TIMESTEP_S = 2e-4
+# Matched to the neural simulation's timestep so that physics sample i and activity sample
+# i describe the same instant. Without that the viewer would have to resample one against
+# the other, and every frame would carry a rounding error.
+PHYSICS_TIMESTEP_S = 1e-4
 
 
 def _model_xml(predator_radius_m: float) -> str:
@@ -86,7 +89,10 @@ class EscapeOutcome:
     #: a perfect escape directly away; 180 is straight into it.
     error_from_away_deg: float | None
     displacement_mm: float
+    #: Fly and predator centres per physics step, in metres. Same length and same clock as
+    #: the neural recording, so the 3D view can drive both from one index.
     path: np.ndarray = field(default_factory=lambda: np.empty((0, 3)))
+    predator_path: np.ndarray = field(default_factory=lambda: np.empty((0, 3)))
 
 
 def _wrap180(degrees: float) -> float:
@@ -137,6 +143,7 @@ class Arena:
         resting_qpos = data.qpos.copy()
         closest_m = float("inf")
         path = np.empty((steps, 3))
+        predator_path = np.empty((steps, 3))
         start_xy = None
 
         for step in range(steps):
@@ -155,6 +162,7 @@ class Arena:
 
             fly = data.xpos[self.fly_body]
             path[step] = fly
+            predator_path[step] = data.mocap_pos[self.predator_mocap]
             separation = float(
                 np.linalg.norm(fly - data.mocap_pos[self.predator_mocap])
             )
@@ -170,6 +178,7 @@ class Arena:
             error_from_away_deg=error,
             displacement_mm=displacement,
             path=path,
+            predator_path=predator_path,
         )
 
     def _launch(self, heading_deg: float, speed: float, elevation_deg: float) -> None:

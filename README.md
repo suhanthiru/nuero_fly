@@ -101,9 +101,19 @@ Reproduce with `scripts/model_ablation.py`, `scripts/compare_models.py` and
 ### Running the demo
 
 ```
-python run_demo.py --ratio 40 --gain 0.03      # simulate a trial and stream it
-npm --prefix viz/frontend run dev              # then open the printed URL
+python run_demo.py --ratio 20 --gain 0.03 --azimuth 35   # simulate a trial and stream it
+npm --prefix viz/frontend run dev                        # then open the printed URL
 ```
+
+Two cameras on one simulation, switched with **w** (world) and **b** (brain) - step N in the
+arena is step N of the spike train. The brain view shows the escape pathway lighting up; the
+world view shows the fly, the floor, and the predator closing, with the takeoff and the
+escape arc as they actually came out of the physics. **f** toggles the camera following the
+fly. `?mode=world&t=620` deep-links a moment in either view.
+
+The fly is drawn at true scale, which looks wrong until you think about it: a *Drosophila*
+is ~2.5 mm long against a 20 mm predator, so it really is a speck. A marker keeps it
+findable when the camera pulls back.
 
 The trial is simulated once at startup and played back at 20 Hz under an adjustable time
 dilation. That is not a shortcut: a trial is 8,000 timesteps over 165k neurons and cannot be

@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from sim.decoder import heading_from_asymmetry
-from world.arena import Arena
+from world.arena import PHYSICS_TIMESTEP_S, Arena
 from world.predator import ApproachTrajectory
 
 
@@ -92,8 +92,20 @@ class TestArenaAdjudication:
         outcome = Arena(self.trajectory()).run(
             takeoff_ms=400.0, heading_deg=180.0, duration_ms=800.0
         )
-        before = outcome.path[: int(0.3 / 2e-4)]  # first 300 ms, well before takeoff
+        before = outcome.path[: int(0.3 / PHYSICS_TIMESTEP_S)]  # 300 ms, before takeoff
         assert np.allclose(before, before[0], atol=1e-9)
+
+    def test_both_paths_are_recorded_on_the_neural_clock(self):
+        """The 3D view drives fly and predator from one index, so they must share a clock."""
+        outcome = Arena(self.trajectory()).run(
+            takeoff_ms=400.0, heading_deg=180.0, duration_ms=800.0
+        )
+        assert outcome.path.shape == outcome.predator_path.shape
+        assert outcome.path.shape[0] == int(round(0.8 / PHYSICS_TIMESTEP_S))
+        # The predator must actually close on the fly over the trial.
+        start = np.linalg.norm(outcome.predator_path[0])
+        end = np.linalg.norm(outcome.predator_path[-1])
+        assert end < start
 
     def test_late_takeoff_fails_and_early_takeoff_succeeds(self):
         arena = Arena(self.trajectory())
