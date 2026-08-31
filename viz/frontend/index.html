@@ -80,6 +80,10 @@
       #worldhud td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
       #worldhud .fired { color: #f43f5e; }
       #worldhud .ok { color: #4ade80; }
+      #worldhud .caveat {
+        color: var(--dim); font-size: 9px; padding-top: 6px; text-align: left;
+        border-top: 1px solid var(--hair); margin-top: 4px;
+      }
 
       #keys { bottom: 14px; left: 14px; color: var(--dim); font-size: 10px; }
       #keys b { color: var(--ink); font-weight: 500; }
@@ -169,6 +173,7 @@
             <tr><td>closest</td><td id="world-closest">—</td></tr>
             <tr><td>approach</td><td id="world-azimuth">—</td></tr>
             <tr><td>escape dir</td><td id="world-heading">—</td></tr>
+            <tr><td colspan="2" class="caveat">body shell only &mdash; no leg mechanics</td></tr>
           </table>
         </div>
       </div>

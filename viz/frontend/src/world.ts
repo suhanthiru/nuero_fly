@@ -6,10 +6,18 @@
  * which is the scale the physics runs at; the brain view uses micrometres and is a separate
  * coordinate space entirely.
  *
- * The fly is drawn at true scale. That is worth stating because it looks wrong at first: a
- * Drosophila is ~2.5 mm long and the predator is a 20 mm sphere, so the fly really is a
- * speck next to it. The camera frames a few centimetres around the fly rather than the
- * whole 160 mm approach, which is what makes the last moments legible.
+ * The fly is drawn at true scale, using the flybody geometry (Vaxenburg et al., Nature
+ * 2025). That is worth stating because it looks wrong at first: a Drosophila is ~2.5 mm long
+ * against a 20 mm stimulus, so it really is a speck. The camera frames a few centimetres
+ * around it rather than the whole 160 mm approach.
+ *
+ * The body is a SHELL. Its legs and wings are frozen in the model's resting pose and are
+ * never actuated - the escape here is a rigid-body impulse, as it has been since Phase 3.
+ * A detailed fly whose joints never move risks implying leg mechanics we do not simulate,
+ * which is why the HUD labels it.
+ *
+ * The predator is a flat disc rather than a solid, because that is the stimulus the
+ * behavioural literature presents and the shape the encoder's angular-size geometry assumes.
  */
 
 import { LineLayer, PathLayer, PointCloudLayer, ScatterplotLayer } from '@deck.gl/layers';
@@ -64,7 +72,7 @@ function sphere(radius: number, segments = 24): {
   return { positions: new Float32Array(positions), indices: new Uint32Array(indices) };
 }
 
-/** An ellipsoid, for the fly body. */
+/** An ellipsoid, the fallback body if the baked fly mesh is unavailable. */
 function ellipsoid(rx: number, ry: number, rz: number, segments = 14) {
   const unit = sphere(1, segments);
   const positions = new Float32Array(unit.positions.length);
@@ -74,6 +82,34 @@ function ellipsoid(rx: number, ry: number, rz: number, segments = 14) {
     positions[i + 2] = unit.positions[i + 2] * rz;
   }
   return { positions, indices: unit.indices };
+}
+
+/**
+ * A flat disc standing perpendicular to the approach bearing.
+ *
+ * This is the stimulus the looming literature actually presents - a dark disc expanding on
+ * a screen, not a solid object - and it is the shape the encoder's angular-size geometry
+ * assumes, since theta = 2 arctan(r/d) is the disc form. The rotation is baked into the
+ * vertices rather than passed as an orientation, because the bearing is fixed for a trial
+ * and baking it avoids depending on deck.gl's Euler convention.
+ */
+function disc(radius: number, azimuthDeg: number, segments = 64) {
+  const a = (azimuthDeg * Math.PI) / 180;
+  // Normal along the bearing; the disc spans the two perpendicular directions.
+  const ux = -Math.sin(a);
+  const uy = Math.cos(a);
+  const positions: number[] = [0, 0, 0];
+  const indices: number[] = [];
+  for (let i = 0; i <= segments; i++) {
+    const t = (i / segments) * Math.PI * 2;
+    positions.push(
+      radius * Math.cos(t) * ux,
+      radius * Math.cos(t) * uy,
+      radius * Math.sin(t),
+    );
+  }
+  for (let i = 1; i <= segments; i++) indices.push(0, i, i + 1);
+  return { positions: new Float32Array(positions), indices: new Uint32Array(indices) };
 }
 
 function floorGrid(extent: number, spacing: number) {
@@ -86,15 +122,23 @@ function floorGrid(extent: number, spacing: number) {
   return source.map((s, i) => ({ source: s, target: target[i] }));
 }
 
-export class WorldScene {
-  private predatorMesh: ReturnType<typeof sphere>;
-  private flyMesh: ReturnType<typeof ellipsoid>;
-  private grid: { source: number[]; target: number[] }[];
+export interface BakedMesh {
+  positions: Float32Array;
+  indices: Uint32Array;
+}
 
-  constructor(private world: World) {
-    this.predatorMesh = sphere(world.predator_radius_mm, 20);
+export class WorldScene {
+  private predatorMesh: { positions: Float32Array; indices: Uint32Array };
+  private flyMesh: { positions: Float32Array; indices: Uint32Array };
+  private grid: { source: number[]; target: number[] }[];
+  /** True when the body is the real flybody geometry rather than the fallback blob. */
+  readonly hasBody: boolean;
+
+  constructor(private world: World, flyMesh?: BakedMesh | null) {
+    this.predatorMesh = disc(world.predator_radius_mm, world.azimuth_deg);
     const [rx, ry, rz] = world.fly_size_mm;
-    this.flyMesh = ellipsoid(rx, ry, rz, 14);
+    this.flyMesh = flyMesh ?? ellipsoid(rx, ry, rz, 14);
+    this.hasBody = Boolean(flyMesh);
     this.grid = floorGrid(120, 10);
   }
 
@@ -139,7 +183,7 @@ export class WorldScene {
         id: 'world-shadows',
         data: [
           { position: [predator[0], predator[1], 0.05], radius: this.world.predator_radius_mm },
-          { position: [fly[0], fly[1], 0.05], radius: 1.6 },
+          { position: [fly[0], fly[1], 0.05], radius: 2.4 },
         ],
         getPosition: (d: any) => d.position,
         getRadius: (d: any) => d.radius,
@@ -165,9 +209,10 @@ export class WorldScene {
           indices: { value: this.predatorMesh.indices, size: 1 },
         },
         getPosition: (d: any) => d.position,
-        getColor: [...PREDATOR, 210] as any,
+        getColor: [...PREDATOR, 225] as any,
         material: false,
-        parameters: { depthWriteEnabled: true, cullMode: 'back' },
+        // A disc has no back, so it must not be culled.
+        parameters: { depthWriteEnabled: true, cullMode: 'none' },
       }),
     ];
 

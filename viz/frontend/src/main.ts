@@ -24,7 +24,7 @@ import { ArenaPanel } from './arena';
 import { loadScene, partition, type Scene } from './scene';
 import { ActivityIndex, Stream, type Frame, type Hello } from './stream';
 import { TracePanel } from './traces';
-import { WorldScene, type World } from './world';
+import { WorldScene, type BakedMesh, type World } from './world';
 
 const STREAM_URL = `ws://${location.hostname}:8000/stream`;
 
@@ -77,14 +77,18 @@ let showMorphology = true;
 type Mode = 'brain' | 'world';
 let mode: Mode = 'brain';
 let worldScene: WorldScene | null = null;
+let flyMesh: BakedMesh | null = null;
 let followFly = true;
 const WORLD_VIEW = {
   target: [0, 0, 0] as [number, number, number],
-  rotationX: 22,
+  rotationX: 18,
   rotationOrbit: -40,
-  zoom: 2.9,
+  // Frames roughly 40 mm around the fly. Wide enough that the 20 mm stimulus fits, close
+  // enough that a 2.5 mm body is a hundred pixels rather than twenty - at the previous
+  // framing the fly was a dot and there was no point rendering a body at all.
+  zoom: 5.2,
   minZoom: -1,
-  maxZoom: 8,
+  maxZoom: 9,
 };
 let worldViewState: ViewState = { ...WORLD_VIEW };
 
@@ -545,8 +549,25 @@ function buildViews(): Record<string, Partial<ViewState>> {
 
 // ----------------------------------------------------------------------------------
 
+/** The baked flybody geometry. Optional: the world falls back to a blob without it. */
+async function loadFlyMesh(): Promise<BakedMesh | null> {
+  try {
+    const manifest = await (await fetch('/scene/fly.json')).json();
+    const buffer = await (await fetch(`/scene/${manifest.file}`)).arrayBuffer();
+    const position = manifest.layout.position;
+    const index = manifest.layout.index;
+    return {
+      positions: new Float32Array(buffer, position.offset, position.length / 4),
+      indices: new Uint32Array(buffer, index.offset, index.length / 4),
+    };
+  } catch {
+    return null;  // run scripts/bake_fly_mesh.py to get the real body
+  }
+}
+
 async function main(): Promise<void> {
   scene = await loadScene();
+  flyMesh = await loadFlyMesh();
   parts = partition(scene.somata);
   pathwayBase = new Uint8Array(parts.pathway.color);
   pathwayColour = new Uint8Array(parts.pathway.color.length);
@@ -587,7 +608,7 @@ async function main(): Promise<void> {
   stream.whenReady((hello) => {
     index = new ActivityIndex(hello, scene.somata.bodyId, parts.pathway.index);
     const world = (hello as any).world as World | null;
-    worldScene = world ? new WorldScene(world) : null;
+    worldScene = world ? new WorldScene(world, flyMesh) : null;
     worldViewState = { ...WORLD_VIEW };
     if (world) {
       text('world-outcome', world.escaped ? 'ESCAPED' : 'CAUGHT');

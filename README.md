@@ -111,9 +111,24 @@ world view shows the fly, the floor, and the predator closing, with the takeoff 
 escape arc as they actually came out of the physics. **f** toggles the camera following the
 fly. `?mode=world&t=620` deep-links a moment in either view.
 
-The fly is drawn at true scale, which looks wrong until you think about it: a *Drosophila*
-is ~2.5 mm long against a 20 mm predator, so it really is a speck. A marker keeps it
-findable when the camera pulls back.
+The fly is the [flybody](https://github.com/google-deepmind/mujoco_menagerie/tree/main/flybody)
+model (Vaxenburg et al., *Nature* 2025; Apache-2.0), baked into a single posed mesh by
+`scripts/bake_fly_mesh.py` after `scripts/fetch_flybody.sh`. It is drawn at true scale -
+2.5 mm body, 5 mm leg span - against a 20 mm stimulus, so it really is a speck.
+
+**The body is a shell.** Its legs and wings are frozen in the model's resting pose and are
+never actuated: the escape is still a rigid-body impulse, exactly as in Phase 3. Rendering
+an articulated fly whose joints never move risks implying leg mechanics that are not
+simulated, so the HUD says so. Driving those joints for real is the NeuroMechFly-class work
+the build spec deferred, and the blocker is not the body but the controller - the decoder
+produces one heading and one takeoff time, while a 102-DOF fly needs commands for every leg
+joint.
+
+The predator is a flat **disc** rather than a solid, because that is the stimulus the
+behavioural literature actually presents - a dark disc expanding on a screen - and it is the
+shape the encoder's angular-size geometry assumes. Its straight-line, constant-velocity
+approach is likewise deliberate: `l/|v|` is only defined for constant velocity, so a
+pursuing predator would invalidate the Phase 2 comparison to published latency data.
 
 The trial is simulated once at startup and played back at 20 Hz under an adjustable time
 dilation. That is not a shortcut: a trial is 8,000 timesteps over 165k neurons and cannot be
